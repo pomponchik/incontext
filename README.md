@@ -110,7 +110,7 @@ backend = backends[environment.backend].one()
 ```
 
 The `incontext` distribution itself publishes the `vllm` entry point. Loading
-that entry point imports `incontext.vllm_plugin`, whose only responsibility is
+that entry point imports `incontext.vllm_provider`, whose only responsibility is
 to construct `VllmBackend`. All `/tokenize` payload rules, vLLM response fields,
 context-length validation, transport settings, and caching live inside that
 class rather than in the budgeting core.
