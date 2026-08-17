@@ -4,30 +4,72 @@ from __future__ import annotations
 
 import inspect
 import math
-import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
-TOKENIZER_URL_ENV = "INCONTEXT_TOKENIZER_URL"
-TOKENIZER_USER_AGENT_ENV = "INCONTEXT_TOKENIZER_USER_AGENT"
-TOKENIZER_TIMEOUT_ENV = "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS"
-FALLBACK_MARGIN_ENV = "INCONTEXT_FALLBACK_MARGIN_TOKENS"
-COMPRESSION_WINDOW_ENV = "INCONTEXT_COMPRESSION_WINDOW_TOKENS"
-
-LEGACY_TOKENIZER_URL_ENV = "HERMES_VLLM_TOKENIZER_URL"
-LEGACY_TOKENIZER_USER_AGENT_ENV = "HERMES_VLLM_TOKENIZER_USER_AGENT"
-LEGACY_TOKENIZER_TIMEOUT_ENV = "HERMES_VLLM_TOKENIZER_TIMEOUT_SECONDS"
-LEGACY_FALLBACK_MARGIN_ENV = "HERMES_DYNAMIC_BUDGET_FALLBACK_MARGIN_TOKENS"
-
-DEFAULT_USER_AGENT = "incontext/0.1"
-DEFAULT_TIMEOUT_SECONDS = 30.0
-DEFAULT_FALLBACK_MARGIN_TOKENS = 1024
+from skelet import EnvSource, Field, Storage
 
 
 class SettingsError(RuntimeError):
     """Raised when incontext cannot derive a safe runtime configuration."""
+
+
+class _Environment(
+    Storage,
+    sources=cast(
+        Any,
+        [
+            *EnvSource.for_library("incontext"),
+            *EnvSource.for_library("hermes_vllm"),
+            *EnvSource.for_library("hermes_dynamic_budget"),
+        ],
+    ),
+):
+    """Typed environment configuration resolved entirely by skelet."""
+
+    tokenizer_url: str = Field(
+        "",
+        conversion=lambda value: value.strip(),
+        validation={
+            "tokenizer_url must not be blank": lambda value: bool(value),
+        },
+        validate_default=False,
+        read_only=True,
+    )
+    tokenizer_user_agent: str = Field(
+        "incontext/0.1",
+        conversion=lambda value: value.strip(),
+        validation={
+            "tokenizer_user_agent must not be blank": lambda value: bool(value),
+        },
+        read_only=True,
+    )
+    tokenizer_timeout_seconds: float = Field(
+        30.0,
+        validation={
+            "tokenizer_timeout_seconds must be greater than 0.0": (
+                lambda value: math.isfinite(value) and value > 0.0
+            ),
+        },
+        read_only=True,
+    )
+    fallback_margin_tokens: int = Field(
+        1024,
+        validation={
+            "fallback_margin_tokens must be at least 0": lambda value: value >= 0,
+        },
+        read_only=True,
+    )
+    compression_window_tokens: int = Field(
+        0,
+        validation={
+            "compression_window_tokens must be positive": lambda value: value > 0,
+        },
+        validate_default=False,
+        read_only=True,
+    )
 
 
 @dataclass(frozen=True)
@@ -98,22 +140,6 @@ def _section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     return value
 
 
-def _environment_value(
-    environ: Mapping[str, str],
-    primary: str,
-    legacy: str | None = None,
-    *,
-    default: str | None = None,
-) -> str | None:
-    for key in (primary, legacy):
-        if key is None:
-            continue
-        value = environ.get(key)
-        if value is not None and value.strip():
-            return value.strip()
-    return default
-
-
 def _validated_http_url(value: str | None, name: str) -> str:
     if value is None:
         raise SettingsError(f"{name} must contain the vLLM /tokenize URL")
@@ -179,7 +205,6 @@ def _load_hermes_components() -> tuple[Callable[[], Any], type[Any]]:
 
 def load_settings(
     *,
-    environ: Mapping[str, str] | None = None,
     config_loader: Callable[[], Any] | None = None,
     compressor_class: type[Any] | None = None,
 ) -> Settings:
@@ -189,7 +214,6 @@ def load_settings(
     instead of duplicating its version-sensitive threshold arithmetic.
     """
 
-    active_environ = os.environ if environ is None else environ
     if config_loader is None or compressor_class is None:
         default_loader, default_compressor = _load_hermes_components()
         config_loader = config_loader or default_loader
@@ -218,11 +242,13 @@ def load_settings(
         maximum_inclusive=1.0,
     )
 
-    window_override = _environment_value(
-        active_environ,
-        COMPRESSION_WINDOW_ENV,
-    )
-    if window_override is None:
+    try:
+        environment = _Environment()
+    except (TypeError, ValueError) as exc:
+        raise SettingsError(str(exc)) from exc
+
+    window_override = environment.compression_window_tokens
+    if window_override == 0:
         compressor = _construct_compressor(
             compressor_class,
             {
@@ -256,11 +282,7 @@ def load_settings(
             minimum=1,
         )
     else:
-        compression_window = _strict_int(
-            window_override,
-            COMPRESSION_WINDOW_ENV,
-            minimum=1,
-        )
+        compression_window = window_override
 
     if compression_window > context_length:
         raise SettingsError(
@@ -268,43 +290,15 @@ def load_settings(
         )
 
     tokenizer_url = _validated_http_url(
-        _environment_value(
-            active_environ,
-            TOKENIZER_URL_ENV,
-            LEGACY_TOKENIZER_URL_ENV,
-        ),
-        TOKENIZER_URL_ENV,
+        environment.tokenizer_url or None,
+        "tokenizer_url",
     )
-    tokenizer_user_agent = _environment_value(
-        active_environ,
-        TOKENIZER_USER_AGENT_ENV,
-        LEGACY_TOKENIZER_USER_AGENT_ENV,
-        default=DEFAULT_USER_AGENT,
-    )
-    assert tokenizer_user_agent is not None
-    tokenizer_timeout = _strict_float(
-        _environment_value(
-            active_environ,
-            TOKENIZER_TIMEOUT_ENV,
-            LEGACY_TOKENIZER_TIMEOUT_ENV,
-            default=str(DEFAULT_TIMEOUT_SECONDS),
-        ),
-        TOKENIZER_TIMEOUT_ENV,
-        minimum_exclusive=0.0,
-    )
-    fallback_margin = _strict_int(
-        _environment_value(
-            active_environ,
-            FALLBACK_MARGIN_ENV,
-            LEGACY_FALLBACK_MARGIN_ENV,
-            default=str(DEFAULT_FALLBACK_MARGIN_TOKENS),
-        ),
-        FALLBACK_MARGIN_ENV,
-        minimum=0,
-    )
+    tokenizer_user_agent = environment.tokenizer_user_agent
+    tokenizer_timeout = environment.tokenizer_timeout_seconds
+    fallback_margin = environment.fallback_margin_tokens
     if fallback_margin >= compression_window:
         raise SettingsError(
-            f"{FALLBACK_MARGIN_ENV} must be below the compression window",
+            "fallback_margin_tokens must be below the compression window",
         )
 
     return Settings(
