@@ -17,6 +17,10 @@ output budget still available below Hermes' context-compression boundary. It
 prevents a fixed, oversized `max_tokens` value from consuming the input space
 where Hermes must still be able to compress the conversation.
 
+The package supports CPython 3.8 through 3.15, including free-threaded Python
+3.14. Unit tests, formatting, linting, and static type checks run across the
+complete version matrix in CI.
+
 The plugin reads the effective compression window from the installed Hermes
 `ContextCompressor`, asks the serving vLLM instance to tokenize the exact
 provider-visible prompt, and applies:
