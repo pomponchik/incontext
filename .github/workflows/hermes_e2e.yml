@@ -1,0 +1,55 @@
+name: Hermes e2e
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hermes-plugin-contract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        hermes-image:
+          - nousresearch/hermes-agent:v2026.7.7.2
+          - nousresearch/hermes-agent:latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel
+        run: |
+          python -m pip install build==1.2.2.post1
+          python -m build --wheel
+
+      - name: Run against real Hermes plugin discovery and middleware
+        env:
+          HERMES_IMAGE: ${{ matrix.hermes-image }}
+        run: |
+          docker pull "$HERMES_IMAGE"
+          docker run --rm \
+            --entrypoint /bin/sh \
+            --volume "$PWD:/work:ro" \
+            --env INCONTEXT_E2E=1 \
+            "$HERMES_IMAGE" \
+            -ec '
+              HERMES_E2E_PYTHON=/opt/hermes/.venv/bin/python
+              if [ ! -x "$HERMES_E2E_PYTHON" ]; then
+                HERMES_E2E_PYTHON="$(command -v python)"
+              fi
+              if "$HERMES_E2E_PYTHON" -m pip --version >/dev/null 2>&1; then
+                "$HERMES_E2E_PYTHON" -m pip install /work/dist/incontext-*.whl pytest==8.3.5
+              else
+                uv pip install --python "$HERMES_E2E_PYTHON" /work/dist/incontext-*.whl pytest==8.3.5
+              fi
+              cd /tmp
+              "$HERMES_E2E_PYTHON" -m pytest -p no:cacheprovider /work/tests/e2e
+            '

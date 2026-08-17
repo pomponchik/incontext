@@ -1,0 +1,105 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "incontext"
+version = "0.1.0"
+authors = [{ name = "Evgeniy Blinov", email = "zheni-b@yandex.ru" }]
+description = "Exact dynamic output budgeting for Hermes Agent and vLLM"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Plugins",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+keywords = ["hermes-agent", "vllm", "llm", "context-window", "plugins"]
+
+[project.entry-points."hermes_agent.plugins"]
+incontext = "incontext"
+
+[project.urls]
+Documentation = "https://github.com/pomponchik/incontext#readme"
+Issues = "https://github.com/pomponchik/incontext/issues"
+Source = "https://github.com/pomponchik/incontext"
+
+[tool.setuptools.package-data]
+incontext = ["py.typed"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+markers = ["e2e: requires a real Hermes Agent installation"]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["incontext"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = false
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+packages = ["incontext"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ruff.lint]
+select = [
+    "A",
+    "ARG",
+    "B",
+    "BLE",
+    "C4",
+    "C90",
+    "E",
+    "F",
+    "I",
+    "N",
+    "PERF",
+    "PIE",
+    "PL",
+    "PT",
+    "PTH",
+    "RET",
+    "RSE",
+    "RUF",
+    "SIM",
+    "T20",
+    "TRY",
+    "UP",
+    "W",
+]
+ignore = ["TRY003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["ARG", "PLR0913", "PLR2004", "S101"]
+
+[tool.mutmut]
+paths_to_mutate = "incontext"
+tests_dir = "tests/units"
