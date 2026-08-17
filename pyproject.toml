@@ -40,7 +40,7 @@ keywords = ["hermes-agent", "vllm", "llm", "context-window", "plugins"]
 incontext = "incontext"
 
 [project.entry-points."incontext.backends"]
-vllm = "incontext.vllm_plugin"
+vllm = "incontext.vllm_provider"
 
 [project.urls]
 Documentation = "https://github.com/pomponchik/incontext#readme"
