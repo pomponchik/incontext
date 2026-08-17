@@ -6,8 +6,9 @@ import logging
 import threading
 from typing import Any
 
+from .backend import backends
 from .budget import DynamicOutputBudget
-from .settings import load_settings
+from .settings import Environment, load_settings
 
 LOGGER = logging.getLogger(__name__)
 _runtime: DynamicOutputBudget | None = None
@@ -17,7 +18,10 @@ _runtime_lock = threading.Lock()
 def build_runtime() -> DynamicOutputBudget:
     """Construct a fully validated runtime."""
 
-    return DynamicOutputBudget(load_settings())
+    environment = Environment()
+    settings = load_settings(environment=environment)
+    backend = backends[environment.backend].one()
+    return DynamicOutputBudget(settings, backend)
 
 
 def get_runtime() -> DynamicOutputBudget:

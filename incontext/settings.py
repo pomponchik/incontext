@@ -7,7 +7,6 @@ import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
-from urllib.parse import urlsplit
 
 from skelet import EnvSource, Field, Storage
 
@@ -16,42 +15,23 @@ class SettingsError(RuntimeError):
     """Raised when incontext cannot derive a safe runtime configuration."""
 
 
-class _Environment(
+class Environment(
     Storage,
     sources=cast(
         Any,
         [
             *EnvSource.for_library("incontext"),
-            *EnvSource.for_library("hermes_vllm"),
             *EnvSource.for_library("hermes_dynamic_budget"),
         ],
     ),
 ):
     """Typed environment configuration resolved entirely by skelet."""
 
-    tokenizer_url: str = Field(
-        "",
+    backend: str = Field(
+        "vllm",
         conversion=lambda value: value.strip(),
         validation={
-            "tokenizer_url must not be blank": lambda value: bool(value),
-        },
-        validate_default=False,
-        read_only=True,
-    )
-    tokenizer_user_agent: str = Field(
-        "incontext/0.1",
-        conversion=lambda value: value.strip(),
-        validation={
-            "tokenizer_user_agent must not be blank": lambda value: bool(value),
-        },
-        read_only=True,
-    )
-    tokenizer_timeout_seconds: float = Field(
-        30.0,
-        validation={
-            "tokenizer_timeout_seconds must be greater than 0.0": (
-                lambda value: math.isfinite(value) and value > 0.0
-            ),
+            "backend must not be blank": lambda value: bool(value),
         },
         read_only=True,
     )
@@ -80,16 +60,10 @@ class Settings:
         "compression_window",
         "context_length",
         "fallback_margin_tokens",
-        "tokenizer_timeout_seconds",
-        "tokenizer_url",
-        "tokenizer_user_agent",
     )
 
     context_length: int
     compression_window: int
-    tokenizer_url: str
-    tokenizer_user_agent: str
-    tokenizer_timeout_seconds: float
     fallback_margin_tokens: int
 
 
@@ -137,19 +111,6 @@ def _section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
         return {}
     if not isinstance(value, Mapping):
         raise SettingsError(f"Hermes {name} configuration must be a mapping")
-    return value
-
-
-def _validated_http_url(value: str | None, name: str) -> str:
-    if value is None:
-        raise SettingsError(f"{name} must contain the vLLM /tokenize URL")
-    parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise SettingsError(f"{name} must contain an HTTP(S) URL")
-    if parsed.username is not None or parsed.password is not None:
-        raise SettingsError(f"{name} must not embed credentials")
-    if parsed.fragment:
-        raise SettingsError(f"{name} must not contain a URL fragment")
     return value
 
 
@@ -205,6 +166,7 @@ def _load_hermes_components() -> tuple[Callable[[], Any], type[Any]]:
 
 def load_settings(
     *,
+    environment: Environment | None = None,
     config_loader: Callable[[], Any] | None = None,
     compressor_class: type[Any] | None = None,
 ) -> Settings:
@@ -243,7 +205,7 @@ def load_settings(
     )
 
     try:
-        environment = _Environment()
+        environment = Environment() if environment is None else environment
     except (TypeError, ValueError) as exc:
         raise SettingsError(str(exc)) from exc
 
@@ -289,12 +251,6 @@ def load_settings(
             "The compression window must not exceed model.context_length",
         )
 
-    tokenizer_url = _validated_http_url(
-        environment.tokenizer_url or None,
-        "tokenizer_url",
-    )
-    tokenizer_user_agent = environment.tokenizer_user_agent
-    tokenizer_timeout = environment.tokenizer_timeout_seconds
     fallback_margin = environment.fallback_margin_tokens
     if fallback_margin >= compression_window:
         raise SettingsError(
@@ -304,8 +260,5 @@ def load_settings(
     return Settings(
         context_length=context_length,
         compression_window=compression_window,
-        tokenizer_url=tokenizer_url,
-        tokenizer_user_agent=tokenizer_user_agent,
-        tokenizer_timeout_seconds=tokenizer_timeout,
         fallback_margin_tokens=fallback_margin,
     )

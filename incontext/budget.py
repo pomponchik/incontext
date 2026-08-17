@@ -4,20 +4,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any
 
+from .backend import Backend
 from .settings import Settings
-from .tokenizer import VllmTokenizer
 
 LOGGER = logging.getLogger(__name__)
 OUTPUT_BUDGET_FIELDS = ("max_tokens", "max_completion_tokens", "max_output_tokens")
-
-
-class TokenCounter(Protocol):
-    """Structural contract used by the middleware's exact counter."""
-
-    def count(self, request: dict[str, Any]) -> int:
-        """Return the provider-visible prompt size."""
 
 
 def compute_max_tokens(
@@ -63,12 +56,12 @@ class DynamicOutputBudget:
     def __init__(
         self,
         settings: Settings,
+        backend: Backend,
         *,
-        tokenizer: TokenCounter | None = None,
         rough_estimator: Callable[[dict[str, Any]], int] | None = None,
     ) -> None:
         self.settings = settings
-        self.tokenizer = VllmTokenizer(settings) if tokenizer is None else tokenizer
+        self.backend = backend
         self.rough_estimator = (
             estimate_request_tokens_rough
             if rough_estimator is None
@@ -89,17 +82,20 @@ class DynamicOutputBudget:
         ):
             return None
 
-        source = "vllm-tokenize"
+        source = self.backend.source
         safety_margin = 0
         try:
-            prompt_tokens = self.tokenizer.count(request)
+            prompt_tokens = self.backend.count(
+                request,
+                context_length=self.settings.context_length,
+            )
         # Middleware must fail open for every provider/transport failure so a
-        # tokenizer outage cannot make Hermes unable to call the model.
+        # backend outage cannot make Hermes unable to call the model.
         except Exception as exact_error:  # noqa: BLE001
             source = "rough-fallback"
             safety_margin = self.settings.fallback_margin_tokens
             LOGGER.warning(
-                "incontext tokenizer_failed type=%s; using Hermes rough estimate",
+                "incontext backend_failed type=%s; using Hermes rough estimate",
                 type(exact_error).__name__,
             )
             try:
