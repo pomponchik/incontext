@@ -1,4 +1,4 @@
-"""Bundled pristan plugin providing the vLLM backend."""
+"""Bundled pristan provider for the vLLM backend."""
 
 from .backend import Backend, backends
 from .vllm import VllmBackend

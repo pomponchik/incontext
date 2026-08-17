@@ -1,4 +1,4 @@
-"""Hermes plugin registration and process-wide runtime lifecycle."""
+"""Hermes integration and process-wide runtime lifecycle."""
 
 from __future__ import annotations
 
