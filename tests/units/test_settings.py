@@ -4,13 +4,14 @@ import builtins
 import types
 from collections.abc import Mapping
 from typing import Any, ClassVar
+from unittest.mock import patch
 
 import pytest
 
 from incontext import settings
 
-BASE_ENV = {settings.TOKENIZER_URL_ENV: "https://inference.example/tokenize"}
-BASE_CONFIG = {
+base_environment = {"INCONTEXT_TOKENIZER_URL": "https://inference.example/tokenize"}
+base_config = {
     "model": {
         "default": "qwen-test",
         "context_length": 65_536,
@@ -20,6 +21,14 @@ BASE_CONFIG = {
     },
     "compression": {"threshold": 0.5},
 }
+
+
+@pytest.fixture(autouse=True)
+def reset_skelet_environment_cache() -> None:
+    """Keep skelet's process-environment cache isolated between unit tests."""
+
+    for source in settings._Environment.__sources__.sources:
+        source.__dict__.pop("data", None)
 
 
 class ModernCompressor:
@@ -46,14 +55,15 @@ class ModernCompressor:
 def load(
     *,
     environment: Mapping[str, str] | None = None,
-    config: Any = BASE_CONFIG,
+    config: Any = base_config,
     compressor: type[Any] = ModernCompressor,
 ) -> settings.Settings:
-    return settings.load_settings(
-        environ=BASE_ENV if environment is None else environment,
-        config_loader=lambda: config,
-        compressor_class=compressor,
-    )
+    active_environment = base_environment if environment is None else environment
+    with patch.dict("os.environ", active_environment, clear=True):
+        return settings.load_settings(
+            config_loader=lambda: config,
+            compressor_class=compressor,
+        )
 
 
 def test_settings_remains_slotted_on_python_38() -> None:
@@ -132,12 +142,47 @@ def test_section_rejects_non_mapping() -> None:
         settings._section({"model": []}, "model")
 
 
-def test_environment_value_prefers_primary_and_skips_blanks() -> None:
-    environment = {"NEW": " value ", "OLD": "legacy"}
-    assert settings._environment_value(environment, "NEW", "OLD") == "value"
-    environment["NEW"] = "  "
-    assert settings._environment_value(environment, "NEW", "OLD") == "legacy"
-    assert settings._environment_value({}, "NEW", default="fallback") == "fallback"
+def test_skelet_environment_prefers_primary_and_converts_fields() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "INCONTEXT_TOKENIZER_URL": " https://primary.test/tokenize ",
+            "HERMES_VLLM_TOKENIZER_URL": "https://legacy.test/tokenize",
+            "INCONTEXT_TOKENIZER_USER_AGENT": " primary-agent ",
+            "HERMES_VLLM_TOKENIZER_USER_AGENT": "legacy-agent",
+            "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": " 12.5 ",
+            "HERMES_VLLM_TOKENIZER_TIMEOUT_SECONDS": "99",
+        },
+        clear=True,
+    ):
+        environment = settings._Environment()
+
+    assert environment.tokenizer_url == "https://primary.test/tokenize"
+    assert environment.tokenizer_user_agent == "primary-agent"
+    assert environment.tokenizer_timeout_seconds == 12.5
+    assert environment.fallback_margin_tokens == 1024
+    assert environment.compression_window_tokens == 0
+
+
+def test_skelet_environment_reads_process_environment() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "INCONTEXT_TOKENIZER_URL": "https://env.test/tokenize",
+            "INCONTEXT_TOKENIZER_USER_AGENT": "env-agent",
+            "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": "9.5",
+            "INCONTEXT_FALLBACK_MARGIN_TOKENS": "256",
+            "INCONTEXT_COMPRESSION_WINDOW_TOKENS": "50000",
+        },
+        clear=True,
+    ):
+        environment = settings._Environment()
+
+    assert environment.tokenizer_url == "https://env.test/tokenize"
+    assert environment.tokenizer_user_agent == "env-agent"
+    assert environment.tokenizer_timeout_seconds == 9.5
+    assert environment.fallback_margin_tokens == 256
+    assert environment.compression_window_tokens == 50_000
 
 
 @pytest.mark.parametrize(
@@ -216,7 +261,7 @@ def test_load_settings_uses_real_compressor_threshold() -> None:
         context_length=65_536,
         compression_window=55_705,
         tokenizer_url="https://inference.example/tokenize",
-        tokenizer_user_agent=settings.DEFAULT_USER_AGENT,
+        tokenizer_user_agent="incontext/0.1",
         tokenizer_timeout_seconds=30.0,
         fallback_margin_tokens=1024,
     )
@@ -230,7 +275,7 @@ def test_load_settings_uses_real_compressor_threshold() -> None:
 def test_load_settings_passes_modern_compression_options() -> None:
     ModernCompressor.calls.clear()
     config = {
-        **BASE_CONFIG,
+        **base_config,
         "compression": {
             "threshold": 0.6,
             "threshold_tokens": 50_000,
@@ -249,7 +294,10 @@ def test_load_settings_explicit_window_avoids_compressor_construction() -> None:
             raise AssertionError("compressor should not run")
 
     result = load(
-        environment={**BASE_ENV, settings.COMPRESSION_WINDOW_ENV: "50000"},
+        environment={
+            **base_environment,
+            "INCONTEXT_COMPRESSION_WINDOW_TOKENS": "50000",
+        },
         compressor=MustNotRun,
     )
     assert result.compression_window == 50_000
@@ -257,14 +305,14 @@ def test_load_settings_explicit_window_avoids_compressor_construction() -> None:
 
 def test_load_settings_prefers_new_environment_names() -> None:
     environment = {
-        settings.TOKENIZER_URL_ENV: "https://new.example/tokenize",
-        settings.LEGACY_TOKENIZER_URL_ENV: "https://old.example/tokenize",
-        settings.TOKENIZER_USER_AGENT_ENV: "new-agent",
-        settings.LEGACY_TOKENIZER_USER_AGENT_ENV: "old-agent",
-        settings.TOKENIZER_TIMEOUT_ENV: "12.5",
-        settings.LEGACY_TOKENIZER_TIMEOUT_ENV: "99",
-        settings.FALLBACK_MARGIN_ENV: "0",
-        settings.LEGACY_FALLBACK_MARGIN_ENV: "999",
+        "INCONTEXT_TOKENIZER_URL": "https://new.example/tokenize",
+        "HERMES_VLLM_TOKENIZER_URL": "https://old.example/tokenize",
+        "INCONTEXT_TOKENIZER_USER_AGENT": "new-agent",
+        "HERMES_VLLM_TOKENIZER_USER_AGENT": "old-agent",
+        "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": "12.5",
+        "HERMES_VLLM_TOKENIZER_TIMEOUT_SECONDS": "99",
+        "INCONTEXT_FALLBACK_MARGIN_TOKENS": "0",
+        "HERMES_DYNAMIC_BUDGET_FALLBACK_MARGIN_TOKENS": "999",
     }
     result = load(environment=environment)
     assert result.tokenizer_url == "https://new.example/tokenize"
@@ -275,10 +323,10 @@ def test_load_settings_prefers_new_environment_names() -> None:
 
 def test_load_settings_supports_legacy_environment_names() -> None:
     environment = {
-        settings.LEGACY_TOKENIZER_URL_ENV: "https://old.example/tokenize",
-        settings.LEGACY_TOKENIZER_USER_AGENT_ENV: "old-agent",
-        settings.LEGACY_TOKENIZER_TIMEOUT_ENV: "5",
-        settings.LEGACY_FALLBACK_MARGIN_ENV: "100",
+        "HERMES_VLLM_TOKENIZER_URL": "https://old.example/tokenize",
+        "HERMES_VLLM_TOKENIZER_USER_AGENT": "old-agent",
+        "HERMES_VLLM_TOKENIZER_TIMEOUT_SECONDS": "5",
+        "HERMES_DYNAMIC_BUDGET_FALLBACK_MARGIN_TOKENS": "100",
     }
     result = load(environment=environment)
     assert result.tokenizer_url == "https://old.example/tokenize"
@@ -293,9 +341,10 @@ def test_load_settings_uses_default_components_when_not_injected(
     monkeypatch.setattr(
         settings,
         "_load_hermes_components",
-        lambda: (lambda: BASE_CONFIG, ModernCompressor),
+        lambda: (lambda: base_config, ModernCompressor),
     )
-    assert settings.load_settings(environ=BASE_ENV).compression_window == 55_705
+    with patch.dict("os.environ", base_environment, clear=True):
+        assert settings.load_settings().compression_window == 55_705
 
 
 def test_load_settings_fills_only_missing_default_dependency(
@@ -304,22 +353,21 @@ def test_load_settings_fills_only_missing_default_dependency(
     monkeypatch.setattr(
         settings,
         "_load_hermes_components",
-        lambda: (lambda: BASE_CONFIG, ModernCompressor),
+        lambda: (lambda: base_config, ModernCompressor),
     )
-    assert (
-        settings.load_settings(
-            environ=BASE_ENV,
-            config_loader=lambda: BASE_CONFIG,
-        ).compression_window
-        == 55_705
-    )
-    assert (
-        settings.load_settings(
-            environ=BASE_ENV,
-            compressor_class=ModernCompressor,
-        ).compression_window
-        == 55_705
-    )
+    with patch.dict("os.environ", base_environment, clear=True):
+        assert (
+            settings.load_settings(
+                config_loader=lambda: base_config,
+            ).compression_window
+            == 55_705
+        )
+        assert (
+            settings.load_settings(
+                compressor_class=ModernCompressor,
+            ).compression_window
+            == 55_705
+        )
 
 
 def test_load_hermes_components_imports_expected_symbols(
@@ -334,7 +382,7 @@ def test_load_hermes_components_imports_expected_symbols(
     config_module = types.ModuleType("hermes_cli.config")
 
     def loader() -> dict[str, Any]:
-        return BASE_CONFIG
+        return base_config
 
     config_module.load_config = loader  # type: ignore[attr-defined]
     monkeypatch.setitem(__import__("sys").modules, "agent", agent_package)
@@ -380,7 +428,7 @@ def test_load_settings_rejects_non_mapping_config() -> None:
 
 @pytest.mark.parametrize("section", ["model", "compression"])
 def test_load_settings_rejects_non_mapping_sections(section: str) -> None:
-    config = dict(BASE_CONFIG)
+    config = dict(base_config)
     config[section] = []
     with pytest.raises(settings.SettingsError, match=section):
         load(config=config)
@@ -388,7 +436,10 @@ def test_load_settings_rejects_non_mapping_sections(section: str) -> None:
 
 @pytest.mark.parametrize("model_name", [None, "", "   ", 123])
 def test_load_settings_requires_model_name(model_name: Any) -> None:
-    config = {**BASE_CONFIG, "model": {**BASE_CONFIG["model"], "default": model_name}}
+    config = {
+        **base_config,
+        "model": {**base_config["model"], "default": model_name},
+    }
     with pytest.raises(settings.SettingsError, match=r"model\.default"):
         load(config=config)
 
@@ -404,7 +455,10 @@ def test_load_settings_rejects_context_mismatch() -> None:
 
 
 def test_load_settings_rejects_window_above_context() -> None:
-    environment = {**BASE_ENV, settings.COMPRESSION_WINDOW_ENV: "65537"}
+    environment = {
+        **base_environment,
+        "INCONTEXT_COMPRESSION_WINDOW_TOKENS": "65537",
+    }
     with pytest.raises(settings.SettingsError, match="must not exceed"):
         load(environment=environment)
 
@@ -412,9 +466,38 @@ def test_load_settings_rejects_window_above_context() -> None:
 @pytest.mark.parametrize(
     ("environment", "message"),
     [
-        ({}, settings.TOKENIZER_URL_ENV),
-        ({**BASE_ENV, settings.TOKENIZER_TIMEOUT_ENV: "0"}, "greater than"),
-        ({**BASE_ENV, settings.FALLBACK_MARGIN_ENV: "55705"}, "below"),
+        ({}, "tokenizer_url"),
+        ({"INCONTEXT_TOKENIZER_URL": "  "}, "must not be blank"),
+        (
+            {
+                **base_environment,
+                "INCONTEXT_TOKENIZER_USER_AGENT": "  ",
+            },
+            "must not be blank",
+        ),
+        (
+            {**base_environment, "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": "0"},
+            "greater than",
+        ),
+        (
+            {
+                **base_environment,
+                "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": "not-a-number",
+            },
+            "float",
+        ),
+        (
+            {**base_environment, "INCONTEXT_FALLBACK_MARGIN_TOKENS": "-1"},
+            "at least 0",
+        ),
+        (
+            {**base_environment, "INCONTEXT_COMPRESSION_WINDOW_TOKENS": "0"},
+            "positive",
+        ),
+        (
+            {**base_environment, "INCONTEXT_FALLBACK_MARGIN_TOKENS": "55705"},
+            "below",
+        ),
     ],
 )
 def test_load_settings_rejects_unsafe_runtime_environment(
