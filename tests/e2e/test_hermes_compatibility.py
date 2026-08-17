@@ -111,7 +111,7 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
         get_plugin_manager,
     )
 
-    from incontext.plugin import get_runtime  # noqa: PLC0415
+    from incontext.hermes import get_runtime  # noqa: PLC0415
     from incontext.vllm import VllmBackend  # noqa: PLC0415
 
     manager = get_plugin_manager()

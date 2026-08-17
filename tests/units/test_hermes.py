@@ -5,7 +5,7 @@ from unittest import mock
 
 import pytest
 
-from incontext import plugin
+from incontext import hermes
 from incontext.backend import Backend
 from incontext.budget import DynamicOutputBudget
 from incontext.settings import Environment, Settings
@@ -21,9 +21,9 @@ class Context:
 
 @pytest.fixture(autouse=True)
 def reset_runtime() -> None:
-    plugin._reset_runtime_for_tests()
+    hermes._reset_runtime_for_tests()
     yield
-    plugin._reset_runtime_for_tests()
+    hermes._reset_runtime_for_tests()
 
 
 def test_build_runtime_uses_validated_settings(runtime_settings: Settings) -> None:
@@ -35,19 +35,19 @@ def test_build_runtime_uses_validated_settings(runtime_settings: Settings) -> No
     backend_slot = mock.MagicMock()
     backend_slot.__getitem__.return_value = selection
     with mock.patch.object(
-        plugin,
+        hermes,
         "Environment",
         return_value=environment,
     ), mock.patch.object(
-        plugin,
+        hermes,
         "load_settings",
         return_value=runtime_settings,
     ) as settings_loader, mock.patch.object(
-        plugin,
+        hermes,
         "backends",
         backend_slot,
-    ), mock.patch.object(plugin, "DynamicOutputBudget") as runtime_class:
-        result = plugin.build_runtime()
+    ), mock.patch.object(hermes, "DynamicOutputBudget") as runtime_class:
+        result = hermes.build_runtime()
     settings_loader.assert_called_once_with(environment=environment)
     backend_slot.__getitem__.assert_called_once_with("selected_backend")
     selection.one.assert_called_once_with()
@@ -57,9 +57,9 @@ def test_build_runtime_uses_validated_settings(runtime_settings: Settings) -> No
 
 def test_get_runtime_builds_once() -> None:
     runtime = mock.create_autospec(DynamicOutputBudget, instance=True)
-    with mock.patch.object(plugin, "build_runtime", return_value=runtime) as builder:
-        assert plugin.get_runtime() is runtime
-        assert plugin.get_runtime() is runtime
+    with mock.patch.object(hermes, "build_runtime", return_value=runtime) as builder:
+        assert hermes.get_runtime() is runtime
+        assert hermes.get_runtime() is runtime
     builder.assert_called_once_with()
 
 
@@ -68,23 +68,23 @@ def test_get_runtime_observes_value_created_while_waiting_for_lock() -> None:
 
     class Lock:
         def __enter__(self) -> None:
-            plugin._runtime = runtime
+            hermes._runtime = runtime
 
         def __exit__(self, *args: Any) -> None:
             return None
 
-    with mock.patch.object(plugin, "_runtime_lock", Lock()), mock.patch.object(
-        plugin,
+    with mock.patch.object(hermes, "_runtime_lock", Lock()), mock.patch.object(
+        hermes,
         "build_runtime",
     ) as builder:
-        assert plugin.get_runtime() is runtime
+        assert hermes.get_runtime() is runtime
     builder.assert_not_called()
 
 
 def test_apply_incontext_delegates_context() -> None:
     runtime = mock.Mock(return_value={"request": {"max_tokens": 1}})
-    with mock.patch.object(plugin, "get_runtime", return_value=runtime):
-        result = plugin.apply_incontext(
+    with mock.patch.object(hermes, "get_runtime", return_value=runtime):
+        result = hermes.apply_incontext(
             request={"messages": []},
             session_id="session",
         )
@@ -98,12 +98,12 @@ def test_register_validates_and_registers_middleware(
     runtime = mock.Mock()
     runtime.settings = runtime_settings
     context = Context()
-    with mock.patch.object(plugin, "get_runtime", return_value=runtime):
-        plugin.register(context)
-    assert context.calls == [("llm_request", plugin.apply_incontext)]
+    with mock.patch.object(hermes, "get_runtime", return_value=runtime):
+        hermes.register(context)
+    assert context.calls == [("llm_request", hermes.apply_incontext)]
 
 
 def test_reset_runtime_removes_cached_value() -> None:
-    plugin._runtime = mock.create_autospec(DynamicOutputBudget, instance=True)
-    plugin._reset_runtime_for_tests()
-    assert plugin._runtime is None
+    hermes._runtime = mock.create_autospec(DynamicOutputBudget, instance=True)
+    hermes._reset_runtime_for_tests()
+    assert hermes._runtime is None

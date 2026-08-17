@@ -32,9 +32,9 @@ def test_backend_contract_is_abstract() -> None:
         Backend()  # type: ignore[abstract]
 
 
-def test_bundled_vllm_plugin_is_selected_by_name() -> None:
+def test_bundled_vllm_provider_is_selected_by_name() -> None:
     # Importing the entry point module is what pristan package discovery does.
-    import incontext.vllm_plugin  # noqa: F401, PLC0415
+    import incontext.vllm_provider  # noqa: F401, PLC0415
 
     with patch.dict(
         "os.environ",
