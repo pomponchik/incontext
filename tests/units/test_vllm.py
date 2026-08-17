@@ -1,0 +1,328 @@
+from __future__ import annotations
+
+import io
+import json
+import urllib.error
+import urllib.request
+from collections.abc import Mapping
+from typing import Any
+from unittest.mock import patch
+
+import pytest
+
+from incontext.vllm import VllmBackend, VllmEnvironment
+
+
+class FakeResponse(io.BytesIO):
+    def __enter__(self) -> FakeResponse:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
+
+
+class RecordingOpener:
+    def __init__(self, responses: list[Any]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[urllib.request.Request, float]] = []
+
+    def __call__(
+        self,
+        request: urllib.request.Request,
+        *,
+        timeout: float,
+    ) -> FakeResponse:
+        self.calls.append((request, timeout))
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return FakeResponse(json.dumps(response).encode())
+
+
+def response(count: Any = 123, context: Any = 65_536) -> dict[str, Any]:
+    return {"count": count, "max_model_len": context}
+
+
+def make_backend(
+    responses: list[Any] | None = None,
+    *,
+    environment: Mapping[str, str] | None = None,
+    cache_entries: Any = 64,
+) -> tuple[VllmBackend, RecordingOpener]:
+    opener = RecordingOpener([] if responses is None else responses)
+    values = {
+        "INCONTEXT_TOKENIZER_URL": "https://inference.example/tokenize",
+        "INCONTEXT_TOKENIZER_USER_AGENT": "incontext-tests",
+        "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": "3.5",
+    }
+    if environment is not None:
+        values = dict(environment)
+    with patch.dict("os.environ", values, clear=True):
+        backend = VllmBackend(cache_entries=cache_entries, opener=opener)
+    return backend, opener
+
+
+def test_source_is_stable_and_non_sensitive() -> None:
+    backend, _ = make_backend()
+    assert backend.source == "vllm-tokenize"
+
+
+def test_build_payload_minimal_shape() -> None:
+    request = {"model": "qwen", "messages": [{"role": "user", "content": "hi"}]}
+    assert VllmBackend._build_payload(request) == {
+        "model": "qwen",
+        "messages": request["messages"],
+        "add_generation_prompt": True,
+    }
+
+
+def test_build_payload_includes_tools_and_template_kwargs() -> None:
+    request = {
+        "model": "qwen",
+        "messages": [],
+        "tools": [{"type": "function"}],
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
+    }
+    payload = VllmBackend._build_payload(request)
+    assert payload["tools"] is request["tools"]
+    assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+@pytest.mark.parametrize(
+    ("tools", "extra_body"),
+    [([], None), ("invalid", []), (None, {"chat_template_kwargs": []})],
+)
+def test_build_payload_ignores_non_effective_optional_fields(
+    tools: Any,
+    extra_body: Any,
+) -> None:
+    payload = VllmBackend._build_payload(
+        {"model": "qwen", "messages": [], "tools": tools, "extra_body": extra_body},
+    )
+    assert "tools" not in payload
+    assert "chat_template_kwargs" not in payload
+
+
+@pytest.mark.parametrize("value", [None, True, False, 0, -1, "1", 1.5])
+def test_positive_response_integer_rejects_invalid_values(value: Any) -> None:
+    with pytest.raises(VllmBackend.VllmBackendError, match="invalid count"):
+        VllmBackend._positive_response_integer({"count": value}, "count")
+
+
+def test_positive_response_integer_accepts_positive_integer() -> None:
+    assert VllmBackend._positive_response_integer({"count": 1}, "count") == 1
+
+
+@pytest.mark.parametrize("cache_entries", [True, "1"])
+def test_backend_rejects_invalid_cache_capacity_type(cache_entries: Any) -> None:
+    with pytest.raises(TypeError, match="positive integer"):
+        make_backend(cache_entries=cache_entries)
+
+
+@pytest.mark.parametrize("cache_entries", [0, -1])
+def test_backend_rejects_non_positive_cache_capacity(cache_entries: int) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        make_backend(cache_entries=cache_entries)
+
+
+def test_environment_prefers_primary_names_and_converts_values() -> None:
+    backend, _ = make_backend(
+        environment={
+            "INCONTEXT_TOKENIZER_URL": " https://primary.test/tokenize ",
+            "HERMES_VLLM_TOKENIZER_URL": "https://legacy.test/tokenize",
+            "INCONTEXT_TOKENIZER_USER_AGENT": " primary-agent ",
+            "HERMES_VLLM_TOKENIZER_USER_AGENT": "legacy-agent",
+            "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": " 12.5 ",
+            "HERMES_VLLM_TOKENIZER_TIMEOUT_SECONDS": "99",
+        },
+    )
+    assert backend._environment.tokenizer_url == "https://primary.test/tokenize"
+    assert backend._environment.tokenizer_user_agent == "primary-agent"
+    assert backend._environment.tokenizer_timeout_seconds == 12.5
+
+
+def test_environment_supports_legacy_names() -> None:
+    backend, _ = make_backend(
+        environment={
+            "HERMES_VLLM_TOKENIZER_URL": "https://legacy.test/tokenize",
+            "HERMES_VLLM_TOKENIZER_USER_AGENT": "legacy-agent",
+            "HERMES_VLLM_TOKENIZER_TIMEOUT_SECONDS": "8",
+        },
+    )
+    assert backend._environment.tokenizer_url == "https://legacy.test/tokenize"
+    assert backend._environment.tokenizer_user_agent == "legacy-agent"
+    assert backend._environment.tokenizer_timeout_seconds == 8
+
+
+@pytest.mark.parametrize(
+    ("environment", "message"),
+    [
+        ({}, "HTTP"),
+        ({"INCONTEXT_TOKENIZER_URL": "  "}, "must not be blank"),
+        ({"INCONTEXT_TOKENIZER_URL": "ftp://example.test/tokenize"}, "HTTP"),
+        ({"INCONTEXT_TOKENIZER_URL": "https:///tokenize"}, "HTTP"),
+        (
+            {"INCONTEXT_TOKENIZER_URL": "https://user:pass@example.test/tokenize"},
+            "credentials",
+        ),
+        (
+            {"INCONTEXT_TOKENIZER_URL": "https://example.test/tokenize#fragment"},
+            "fragment",
+        ),
+        (
+            {
+                "INCONTEXT_TOKENIZER_URL": "https://example.test/tokenize",
+                "INCONTEXT_TOKENIZER_USER_AGENT": "  ",
+            },
+            "must not be blank",
+        ),
+        (
+            {
+                "INCONTEXT_TOKENIZER_URL": "https://example.test/tokenize",
+                "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": "0",
+            },
+            "greater than",
+        ),
+        (
+            {
+                "INCONTEXT_TOKENIZER_URL": "https://example.test/tokenize",
+                "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": "not-a-number",
+            },
+            "float",
+        ),
+    ],
+)
+def test_backend_rejects_unsafe_environment(
+    environment: Mapping[str, str],
+    message: str,
+) -> None:
+    with pytest.raises(VllmBackend.VllmBackendError, match=message):
+        make_backend(environment=environment)
+
+
+def test_backend_accepts_http_url_with_query() -> None:
+    backend, _ = make_backend(
+        environment={
+            "INCONTEXT_TOKENIZER_URL": "http://127.0.0.1/tokenize?mode=1",
+        },
+    )
+    assert backend._environment.tokenizer_url.endswith("?mode=1")
+
+
+def test_backend_accepts_an_injected_environment() -> None:
+    with patch.dict(
+        "os.environ",
+        {"INCONTEXT_TOKENIZER_URL": "https://injected.test/tokenize"},
+        clear=True,
+    ):
+        environment = VllmEnvironment()
+    backend = VllmBackend(environment=environment, opener=RecordingOpener([]))
+    assert backend._environment is environment
+
+
+def test_backend_sends_exact_request_and_caches_result() -> None:
+    backend, opener = make_backend([response(321)])
+    request = {
+        "model": "qwen",
+        "messages": [{"role": "user", "content": "Привет"}],
+        "tools": [{"type": "function", "function": {"name": "test"}}],
+    }
+    assert backend.count(request, context_length=65_536) == 321
+    assert backend.count(request, context_length=65_536) == 321
+    assert len(opener.calls) == 1
+    http_request, timeout = opener.calls[0]
+    assert http_request.full_url == "https://inference.example/tokenize"
+    assert http_request.method == "POST"
+    assert http_request.get_header("Content-type") == "application/json"
+    assert http_request.get_header("User-agent") == "incontext-tests"
+    assert timeout == 3.5
+    assert json.loads(http_request.data or b"") == VllmBackend._build_payload(request)
+
+
+def test_cache_does_not_bypass_context_length_validation() -> None:
+    backend, opener = make_backend([response(1), response(1)])
+    request = {"model": "qwen", "messages": []}
+    assert backend.count(request, context_length=65_536) == 1
+    with pytest.raises(VllmBackend.VllmBackendError, match="does not match"):
+        backend.count(request, context_length=32_000)
+    assert len(opener.calls) == 2
+
+
+def test_default_opener_is_resolved_at_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opener = RecordingOpener([response()])
+    monkeypatch.setattr(urllib.request, "urlopen", opener)
+    with patch.dict(
+        "os.environ",
+        {"INCONTEXT_TOKENIZER_URL": "https://inference.test/tokenize"},
+        clear=True,
+    ):
+        backend = VllmBackend()
+    assert (
+        backend.count({"model": "qwen", "messages": []}, context_length=65_536) == 123
+    )
+
+
+def test_lru_evicts_oldest_entry() -> None:
+    backend, opener = make_backend(
+        [response(1), response(2), response(3), response(4)],
+        cache_entries=2,
+    )
+    first = {"model": "qwen", "messages": [{"content": "first"}]}
+    second = {"model": "qwen", "messages": [{"content": "second"}]}
+    third = {"model": "qwen", "messages": [{"content": "third"}]}
+    assert backend.count(first, context_length=65_536) == 1
+    assert backend.count(second, context_length=65_536) == 2
+    assert backend.count(first, context_length=65_536) == 1
+    assert backend.count(third, context_length=65_536) == 3
+    assert backend.count(second, context_length=65_536) == 4
+    assert len(opener.calls) == 4
+
+
+def test_clear_cache_forces_new_request() -> None:
+    backend, _ = make_backend([response(1), response(2)])
+    request = {"model": "qwen", "messages": []}
+    assert backend.count(request, context_length=65_536) == 1
+    backend.clear_cache()
+    assert backend.count(request, context_length=65_536) == 2
+
+
+def test_transport_failure_is_not_cached() -> None:
+    backend, _ = make_backend([urllib.error.URLError("offline"), response(5)])
+    request = {"model": "qwen", "messages": []}
+    with pytest.raises(urllib.error.URLError):
+        backend.count(request, context_length=65_536)
+    assert backend.count(request, context_length=65_536) == 5
+
+
+def test_non_serializable_payload_is_rejected() -> None:
+    backend, _ = make_backend()
+    with pytest.raises(TypeError):
+        backend.count(
+            {"model": "qwen", "messages": [object()]},
+            context_length=65_536,
+        )
+
+
+def test_non_object_response_is_rejected() -> None:
+    backend, _ = make_backend([[1, 2, 3]])
+    with pytest.raises(VllmBackend.VllmBackendError, match="non-object"):
+        backend.count({"model": "qwen", "messages": []}, context_length=65_536)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"max_model_len": 65_536}, "invalid count"),
+        ({"count": 1}, "invalid max_model_len"),
+        (response(1, 32_000), "does not match"),
+    ],
+)
+def test_response_contract_is_validated(
+    payload: dict[str, Any],
+    message: str,
+) -> None:
+    backend, _ = make_backend([payload])
+    with pytest.raises(VllmBackend.VllmBackendError, match=message):
+        backend.count({"model": "qwen", "messages": []}, context_length=65_536)
