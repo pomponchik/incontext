@@ -30,9 +30,18 @@ class SettingsError(RuntimeError):
     """Raised when incontext cannot derive a safe runtime configuration."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Settings:
     """Validated immutable runtime settings."""
+
+    __slots__ = (
+        "compression_window",
+        "context_length",
+        "fallback_margin_tokens",
+        "tokenizer_timeout_seconds",
+        "tokenizer_url",
+        "tokenizer_user_agent",
+    )
 
     context_length: int
     compression_window: int
