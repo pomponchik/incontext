@@ -97,37 +97,3 @@ aliases. New deployments should use the `INCONTEXT_*` names.
 
 The tokenizer endpoint sees the prompt content by design. Run it on a trusted
 network path and use the same access controls as the inference endpoint.
-
-## Development
-
-The repository layout follows the conventions used by
-[`pristan`](https://github.com/mutating/pristan): strict typing and linting,
-cross-platform CI, full branch coverage, issue templates, build validation,
-and a main-only trusted-publishing workflow.
-
-```bash
-python -m venv .venv
-.venv/bin/pip install -r requirements_dev.txt
-.venv/bin/pip install -e .
-
-.venv/bin/ruff format --check .
-.venv/bin/ruff check .
-.venv/bin/mypy incontext
-.venv/bin/coverage run -m pytest tests/units
-.venv/bin/coverage report -m
-.venv/bin/python -m build
-.venv/bin/twine check dist/*
-```
-
-Unit tests live in `tests/units` and enforce 100% line and branch coverage—the
-maximum possible value. The test suite also uses property-based checks for the
-budget invariants. `tests/e2e` installs the built artifact into real Hermes
-Agent environments and exercises entry-point discovery plus the actual
-`llm_request` middleware pipeline.
-
-The release workflow runs only after a push to `main`. Work on `develop` never
-publishes to PyPI.
-
-## License
-
-MIT
