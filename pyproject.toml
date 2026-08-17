@@ -43,7 +43,7 @@ incontext = "incontext"
 vllm = "incontext.vllm_provider"
 
 [project.urls]
-Documentation = "https://github.com/pomponchik/incontext#readme"
+Documentation = "https://github.com/pomponchik/incontext"
 Issues = "https://github.com/pomponchik/incontext/issues"
 Source = "https://github.com/pomponchik/incontext"
 
