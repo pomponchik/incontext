@@ -57,8 +57,8 @@ class Settings:
     """Validated immutable runtime settings."""
 
     __slots__ = (
-        "compression_window",
         "context_length",
+        "compression_window",
         "fallback_margin_tokens",
     )
 
