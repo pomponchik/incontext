@@ -64,7 +64,7 @@ endpoint of the same vLLM model Hermes uses:
 export INCONTEXT_BACKEND='vllm'
 export INCONTEXT_TOKENIZER_URL='https://inference.example/tokenize'
 export INCONTEXT_TOKENIZER_TIMEOUT_SECONDS='30'
-export INCONTEXT_TOKENIZER_USER_AGENT='incontext/0.1'
+export INCONTEXT_TOKENIZER_USER_AGENT='incontext/0.0.1'
 export INCONTEXT_FALLBACK_MARGIN_TOKENS='1024'
 ```
 
@@ -85,7 +85,7 @@ The optional variables are:
 |---|---:|---|
 | `INCONTEXT_BACKEND` | `vllm` | Named `pristan` backend plugin |
 | `INCONTEXT_TOKENIZER_TIMEOUT_SECONDS` | `30` | `/tokenize` request timeout |
-| `INCONTEXT_TOKENIZER_USER_AGENT` | `incontext/0.1` | HTTP user agent |
+| `INCONTEXT_TOKENIZER_USER_AGENT` | `incontext/0.0.1` | HTTP user agent |
 | `INCONTEXT_FALLBACK_MARGIN_TOKENS` | `1024` | Extra reserve only when exact tokenization fails |
 | `INCONTEXT_COMPRESSION_WINDOW_TOKENS` | unset | Explicit emergency override for the resolved Hermes boundary |
 
