@@ -9,11 +9,11 @@ build-backend = "setuptools.build_meta"
 name = "incontext"
 version = "0.0.1"
 authors = [{ name = "Evgeniy Blinov", email = "zheni-b@yandex.ru" }]
-description = "Exact dynamic output budgeting for Hermes Agent and vLLM"
+description = "Exact dynamic output budgeting for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { file = "LICENSE" }
-dependencies = ["skelet>=0.0.21"]
+dependencies = ["pristan>=0.0.24", "skelet>=0.0.21"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Plugins",
@@ -38,6 +38,9 @@ keywords = ["hermes-agent", "vllm", "llm", "context-window", "plugins"]
 
 [project.entry-points."hermes_agent.plugins"]
 incontext = "incontext"
+
+[project.entry-points."incontext.backends"]
+vllm = "incontext.vllm_plugin"
 
 [project.urls]
 Documentation = "https://github.com/pomponchik/incontext#readme"
