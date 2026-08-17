@@ -56,6 +56,10 @@ def load(
     )
 
 
+def test_settings_remains_slotted_on_python_38() -> None:
+    assert not hasattr(load(), "__dict__")
+
+
 @pytest.mark.parametrize(("value", "expected"), [(1, 1), (" 42 ", 42), (0, 0)])
 def test_strict_int_accepts_exact_integers(value: Any, expected: int) -> None:
     assert settings._strict_int(value, "value", minimum=0) == expected

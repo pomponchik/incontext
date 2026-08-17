@@ -26,10 +26,11 @@ def reset_runtime() -> None:
 
 
 def test_build_runtime_uses_validated_settings(runtime_settings: Settings) -> None:
-    with (
-        mock.patch.object(plugin, "load_settings", return_value=runtime_settings),
-        mock.patch.object(plugin, "DynamicOutputBudget") as runtime_class,
-    ):
+    with mock.patch.object(
+        plugin,
+        "load_settings",
+        return_value=runtime_settings,
+    ), mock.patch.object(plugin, "DynamicOutputBudget") as runtime_class:
         result = plugin.build_runtime()
     runtime_class.assert_called_once_with(runtime_settings)
     assert result is runtime_class.return_value
@@ -53,10 +54,10 @@ def test_get_runtime_observes_value_created_while_waiting_for_lock() -> None:
         def __exit__(self, *args: Any) -> None:
             return None
 
-    with (
-        mock.patch.object(plugin, "_runtime_lock", Lock()),
-        mock.patch.object(plugin, "build_runtime") as builder,
-    ):
+    with mock.patch.object(plugin, "_runtime_lock", Lock()), mock.patch.object(
+        plugin,
+        "build_runtime",
+    ) as builder:
         assert plugin.get_runtime() is runtime
     builder.assert_not_called()
 
