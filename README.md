@@ -10,7 +10,7 @@
 
 </details>
 
-![incontext logo](https://raw.githubusercontent.com/pomponchik/incontext/develop/docs/assets/logo_1.svg)
+![incontext logo](https://raw.githubusercontent.com/pomponchik/incontext/develop/docs/assets/logo.svg)
 
 `incontext` is a Hermes Agent plugin that gives each LLM request exactly the
 output budget still available below Hermes' context-compression boundary. It
