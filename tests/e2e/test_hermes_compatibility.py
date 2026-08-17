@@ -112,6 +112,7 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
     )
 
     from incontext.plugin import get_runtime  # noqa: PLC0415
+    from incontext.vllm import VllmBackend  # noqa: PLC0415
 
     manager = get_plugin_manager()
     manager.discover_and_load(force=True)
@@ -138,6 +139,7 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
     result = apply_llm_request_middleware(original, session_id="incontext-e2e")
     runtime = get_runtime()
 
+    assert isinstance(runtime.backend, VllmBackend)
     assert result.changed is True
     assert result.original_payload == original
     assert result.payload is not original

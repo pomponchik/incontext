@@ -4,26 +4,44 @@ import logging
 import sys
 import types
 from typing import Any
-from unittest import mock
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from incontext import budget
+from incontext.backend import Backend
 from incontext.settings import Settings
 
 
-class Counter:
-    def __init__(self, result: int | BaseException) -> None:
+class Counter(Backend):
+    def __init__(
+        self,
+        result: int | BaseException,
+        *,
+        source: str = "unit-backend",
+    ) -> None:
         self.result = result
-        self.requests: list[dict[str, Any]] = []
+        self._source = source
+        self.requests: list[tuple[dict[str, Any], int]] = []
 
-    def count(self, request: dict[str, Any]) -> int:
-        self.requests.append(request)
+    @property
+    def source(self) -> str:
+        return self._source
+
+    def count(
+        self,
+        request: dict[str, Any],
+        *,
+        context_length: int,
+    ) -> int:
+        self.requests.append((request, context_length))
         if isinstance(self.result, BaseException):
             raise self.result
         return self.result
+
+    def clear_cache(self) -> None:
+        self.requests.clear()
 
 
 @pytest.mark.parametrize(
@@ -109,10 +127,12 @@ def test_estimate_request_tokens_rough_handles_invalid_result(
     assert budget.estimate_request_tokens_rough(request) == 1
 
 
-def test_runtime_constructs_default_dependencies(runtime_settings: Settings) -> None:
-    with mock.patch.object(budget, "VllmTokenizer") as tokenizer_class:
-        runtime = budget.DynamicOutputBudget(runtime_settings)
-    tokenizer_class.assert_called_once_with(runtime_settings)
+def test_runtime_keeps_injected_backend_and_default_estimator(
+    runtime_settings: Settings,
+) -> None:
+    backend = Counter(1)
+    runtime = budget.DynamicOutputBudget(runtime_settings, backend)
+    assert runtime.backend is backend
     assert runtime.rough_estimator is budget.estimate_request_tokens_rough
 
 
@@ -122,7 +142,7 @@ def test_runtime_exact_count_rewrites_all_output_aliases(
     counter = Counter(10_000)
     runtime = budget.DynamicOutputBudget(
         runtime_settings,
-        tokenizer=counter,
+        counter,
         rough_estimator=lambda request: 999,
     )
     request = {
@@ -141,9 +161,9 @@ def test_runtime_exact_count_rewrites_all_output_aliases(
     assert "max_output_tokens" not in rewritten
     assert rewritten["temperature"] == 0.5
     assert request["max_tokens"] == 10
-    assert counter.requests == [request]
+    assert counter.requests == [(request, 65_536)]
     assert result["source"] == "incontext"
-    assert "vllm-tokenize" in result["reason"]
+    assert "unit-backend" in result["reason"]
 
 
 def test_runtime_fallback_reserves_safety_margin(
@@ -152,7 +172,7 @@ def test_runtime_fallback_reserves_safety_margin(
 ) -> None:
     runtime = budget.DynamicOutputBudget(
         runtime_settings,
-        tokenizer=Counter(TimeoutError("secret failure")),
+        Counter(TimeoutError("secret failure")),
         rough_estimator=lambda request: 12_000,
     )
     request = {
@@ -173,7 +193,7 @@ def test_runtime_normalizes_non_positive_fallback_estimate(
 ) -> None:
     runtime = budget.DynamicOutputBudget(
         runtime_settings,
-        tokenizer=Counter(RuntimeError()),
+        Counter(RuntimeError()),
         rough_estimator=lambda request: 0,
     )
     result = runtime(request={"model": "qwen", "messages": []})
@@ -190,7 +210,7 @@ def test_runtime_leaves_request_unchanged_when_both_estimators_fail(
 
     runtime = budget.DynamicOutputBudget(
         runtime_settings,
-        tokenizer=Counter(RuntimeError("exact secret")),
+        Counter(RuntimeError("exact secret")),
         rough_estimator=broken_fallback,
     )
     request = {"model": "qwen", "messages": []}
@@ -208,7 +228,7 @@ def test_runtime_ignores_unsupported_request_shapes(
     runtime_settings: Settings,
     payload: Any,
 ) -> None:
-    runtime = budget.DynamicOutputBudget(runtime_settings, tokenizer=Counter(1))
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(1))
     assert runtime(request=payload) is None
 
 

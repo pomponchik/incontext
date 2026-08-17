@@ -10,7 +10,7 @@ import pytest
 
 from incontext import settings
 
-base_environment = {"INCONTEXT_TOKENIZER_URL": "https://inference.example/tokenize"}
+base_environment: dict[str, str] = {}
 base_config = {
     "model": {
         "default": "qwen-test",
@@ -21,14 +21,6 @@ base_config = {
     },
     "compression": {"threshold": 0.5},
 }
-
-
-@pytest.fixture(autouse=True)
-def reset_skelet_environment_cache() -> None:
-    """Keep skelet's process-environment cache isolated between unit tests."""
-
-    for source in settings._Environment.__sources__.sources:
-        source.__dict__.pop("data", None)
 
 
 class ModernCompressor:
@@ -146,21 +138,16 @@ def test_skelet_environment_prefers_primary_and_converts_fields() -> None:
     with patch.dict(
         "os.environ",
         {
-            "INCONTEXT_TOKENIZER_URL": " https://primary.test/tokenize ",
-            "HERMES_VLLM_TOKENIZER_URL": "https://legacy.test/tokenize",
-            "INCONTEXT_TOKENIZER_USER_AGENT": " primary-agent ",
-            "HERMES_VLLM_TOKENIZER_USER_AGENT": "legacy-agent",
-            "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": " 12.5 ",
-            "HERMES_VLLM_TOKENIZER_TIMEOUT_SECONDS": "99",
+            "INCONTEXT_BACKEND": " custom_backend ",
+            "INCONTEXT_FALLBACK_MARGIN_TOKENS": "256",
+            "HERMES_DYNAMIC_BUDGET_FALLBACK_MARGIN_TOKENS": "999",
         },
         clear=True,
     ):
-        environment = settings._Environment()
+        environment = settings.Environment()
 
-    assert environment.tokenizer_url == "https://primary.test/tokenize"
-    assert environment.tokenizer_user_agent == "primary-agent"
-    assert environment.tokenizer_timeout_seconds == 12.5
-    assert environment.fallback_margin_tokens == 1024
+    assert environment.backend == "custom_backend"
+    assert environment.fallback_margin_tokens == 256
     assert environment.compression_window_tokens == 0
 
 
@@ -168,47 +155,16 @@ def test_skelet_environment_reads_process_environment() -> None:
     with patch.dict(
         "os.environ",
         {
-            "INCONTEXT_TOKENIZER_URL": "https://env.test/tokenize",
-            "INCONTEXT_TOKENIZER_USER_AGENT": "env-agent",
-            "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": "9.5",
             "INCONTEXT_FALLBACK_MARGIN_TOKENS": "256",
             "INCONTEXT_COMPRESSION_WINDOW_TOKENS": "50000",
         },
         clear=True,
     ):
-        environment = settings._Environment()
+        environment = settings.Environment()
 
-    assert environment.tokenizer_url == "https://env.test/tokenize"
-    assert environment.tokenizer_user_agent == "env-agent"
-    assert environment.tokenizer_timeout_seconds == 9.5
+    assert environment.backend == "vllm"
     assert environment.fallback_margin_tokens == 256
     assert environment.compression_window_tokens == 50_000
-
-
-@pytest.mark.parametrize(
-    ("value", "message"),
-    [
-        (None, "must contain the vLLM"),
-        ("ftp://example.test/tokenize", "HTTP"),
-        ("https:///tokenize", "HTTP"),
-        ("https://user:pass@example.test/tokenize", "credentials"),
-        ("https://example.test/tokenize#fragment", "fragment"),
-    ],
-)
-def test_validated_http_url_rejects_unsafe_values(
-    value: str | None,
-    message: str,
-) -> None:
-    with pytest.raises(settings.SettingsError, match=message):
-        settings._validated_http_url(value, "URL")
-
-
-@pytest.mark.parametrize(
-    "value",
-    ["http://127.0.0.1:8000/tokenize", "https://example.test/tokenize?mode=1"],
-)
-def test_validated_http_url_accepts_http_urls(value: str) -> None:
-    assert settings._validated_http_url(value, "URL") == value
 
 
 def test_normalized_model_thresholds_keeps_only_finite_numbers() -> None:
@@ -260,9 +216,6 @@ def test_load_settings_uses_real_compressor_threshold() -> None:
     assert result == settings.Settings(
         context_length=65_536,
         compression_window=55_705,
-        tokenizer_url="https://inference.example/tokenize",
-        tokenizer_user_agent="incontext/0.1",
-        tokenizer_timeout_seconds=30.0,
         fallback_margin_tokens=1024,
     )
     call = ModernCompressor.calls[-1]
@@ -305,33 +258,26 @@ def test_load_settings_explicit_window_avoids_compressor_construction() -> None:
 
 def test_load_settings_prefers_new_environment_names() -> None:
     environment = {
-        "INCONTEXT_TOKENIZER_URL": "https://new.example/tokenize",
-        "HERMES_VLLM_TOKENIZER_URL": "https://old.example/tokenize",
-        "INCONTEXT_TOKENIZER_USER_AGENT": "new-agent",
-        "HERMES_VLLM_TOKENIZER_USER_AGENT": "old-agent",
-        "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": "12.5",
-        "HERMES_VLLM_TOKENIZER_TIMEOUT_SECONDS": "99",
+        "INCONTEXT_BACKEND": "other_backend",
         "INCONTEXT_FALLBACK_MARGIN_TOKENS": "0",
         "HERMES_DYNAMIC_BUDGET_FALLBACK_MARGIN_TOKENS": "999",
     }
-    result = load(environment=environment)
-    assert result.tokenizer_url == "https://new.example/tokenize"
-    assert result.tokenizer_user_agent == "new-agent"
-    assert result.tokenizer_timeout_seconds == 12.5
+    with patch.dict("os.environ", environment, clear=True):
+        resolved_environment = settings.Environment()
+        result = settings.load_settings(
+            environment=resolved_environment,
+            config_loader=lambda: base_config,
+            compressor_class=ModernCompressor,
+        )
+    assert resolved_environment.backend == "other_backend"
     assert result.fallback_margin_tokens == 0
 
 
 def test_load_settings_supports_legacy_environment_names() -> None:
     environment = {
-        "HERMES_VLLM_TOKENIZER_URL": "https://old.example/tokenize",
-        "HERMES_VLLM_TOKENIZER_USER_AGENT": "old-agent",
-        "HERMES_VLLM_TOKENIZER_TIMEOUT_SECONDS": "5",
         "HERMES_DYNAMIC_BUDGET_FALLBACK_MARGIN_TOKENS": "100",
     }
     result = load(environment=environment)
-    assert result.tokenizer_url == "https://old.example/tokenize"
-    assert result.tokenizer_user_agent == "old-agent"
-    assert result.tokenizer_timeout_seconds == 5
     assert result.fallback_margin_tokens == 100
 
 
@@ -466,26 +412,7 @@ def test_load_settings_rejects_window_above_context() -> None:
 @pytest.mark.parametrize(
     ("environment", "message"),
     [
-        ({}, "tokenizer_url"),
-        ({"INCONTEXT_TOKENIZER_URL": "  "}, "must not be blank"),
-        (
-            {
-                **base_environment,
-                "INCONTEXT_TOKENIZER_USER_AGENT": "  ",
-            },
-            "must not be blank",
-        ),
-        (
-            {**base_environment, "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": "0"},
-            "greater than",
-        ),
-        (
-            {
-                **base_environment,
-                "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": "not-a-number",
-            },
-            "float",
-        ),
+        ({"INCONTEXT_BACKEND": "  "}, "must not be blank"),
         (
             {**base_environment, "INCONTEXT_FALLBACK_MARGIN_TOKENS": "-1"},
             "at least 0",

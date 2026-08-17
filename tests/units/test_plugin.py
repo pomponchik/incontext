@@ -6,8 +6,9 @@ from unittest import mock
 import pytest
 
 from incontext import plugin
+from incontext.backend import Backend
 from incontext.budget import DynamicOutputBudget
-from incontext.settings import Settings
+from incontext.settings import Environment, Settings
 
 
 class Context:
@@ -26,13 +27,31 @@ def reset_runtime() -> None:
 
 
 def test_build_runtime_uses_validated_settings(runtime_settings: Settings) -> None:
+    environment = mock.create_autospec(Environment, instance=True)
+    environment.backend = "selected_backend"
+    backend = mock.create_autospec(Backend, instance=True)
+    selection = mock.Mock()
+    selection.one.return_value = backend
+    backend_slot = mock.MagicMock()
+    backend_slot.__getitem__.return_value = selection
     with mock.patch.object(
+        plugin,
+        "Environment",
+        return_value=environment,
+    ), mock.patch.object(
         plugin,
         "load_settings",
         return_value=runtime_settings,
+    ) as settings_loader, mock.patch.object(
+        plugin,
+        "backends",
+        backend_slot,
     ), mock.patch.object(plugin, "DynamicOutputBudget") as runtime_class:
         result = plugin.build_runtime()
-    runtime_class.assert_called_once_with(runtime_settings)
+    settings_loader.assert_called_once_with(environment=environment)
+    backend_slot.__getitem__.assert_called_once_with("selected_backend")
+    selection.one.assert_called_once_with()
+    runtime_class.assert_called_once_with(runtime_settings, backend)
     assert result is runtime_class.return_value
 
 
