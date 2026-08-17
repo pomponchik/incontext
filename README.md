@@ -66,6 +66,12 @@ export INCONTEXT_TOKENIZER_USER_AGENT='incontext/0.1'
 export INCONTEXT_FALLBACK_MARGIN_TOKENS='1024'
 ```
 
+Environment variables are loaded through typed `skelet.Storage` fields backed
+by ordered `skelet.EnvSource` instances. Primary `INCONTEXT_*` names take
+precedence over the supported legacy aliases. Text normalization and blank
+value rejection are implemented by the fields' native `conversion` and
+`validation` rules.
+
 Hermes' `model.default`, `model.context_length`, and `compression.threshold`
 remain the source of truth. The plugin constructs Hermes' installed
 `ContextCompressor` and uses its resolved `threshold_tokens`; it does not copy
