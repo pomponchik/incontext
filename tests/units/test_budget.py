@@ -135,7 +135,7 @@ def test_runtime_keeps_injected_backend_and_default_estimator(
     assert runtime.rough_estimator is budget.estimate_request_tokens_rough
 
 
-def test_runtime_exact_count_rewrites_all_output_aliases(
+def test_runtime_exact_count_preserves_smallest_existing_output_cap(
     runtime_settings: Settings,
 ) -> None:
     counter = Counter(10_000)
@@ -155,7 +155,7 @@ def test_runtime_exact_count_rewrites_all_output_aliases(
     result = runtime(request=request, session_id="ignored")
     assert result is not None
     rewritten = result["request"]
-    assert rewritten["max_tokens"] == 45_705
+    assert rewritten["max_tokens"] == 10
     assert "max_completion_tokens" not in rewritten
     assert "max_output_tokens" not in rewritten
     assert rewritten["temperature"] == 0.5
@@ -163,6 +163,65 @@ def test_runtime_exact_count_rewrites_all_output_aliases(
     assert counter.requests == [(request, 65_536)]
     assert result["source"] == "incontext"
     assert "unit-backend" in result["reason"]
+
+
+def test_runtime_uses_all_free_space_without_an_existing_output_cap(
+    runtime_settings: Settings,
+) -> None:
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(10_000))
+    result = runtime(request={"model": "qwen", "messages": []})
+    assert result is not None
+    assert result["request"]["max_tokens"] == 45_705
+
+
+@pytest.mark.parametrize(
+    "invalid_cap",
+    [None, True, False, 0, -1, 1.5, "2048"],
+)
+def test_runtime_ignores_invalid_existing_output_caps(
+    runtime_settings: Settings,
+    invalid_cap: Any,
+) -> None:
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(10_000))
+    result = runtime(
+        request={
+            "model": "qwen",
+            "messages": [],
+            "max_tokens": invalid_cap,
+        },
+    )
+    assert result is not None
+    assert result["request"]["max_tokens"] == 45_705
+
+
+@given(
+    free_space=st.integers(min_value=1, max_value=50_000),
+    requested_cap=st.integers(min_value=1, max_value=1_000_000),
+)
+def test_existing_output_cap_is_never_increased(
+    free_space: int,
+    requested_cap: int,
+) -> None:
+    runtime_settings = Settings(
+        model_name="qwen",
+        context_length=65_536,
+        compression_window=55_705,
+        fallback_margin_tokens=1024,
+    )
+    prompt_tokens = runtime_settings.compression_window - free_space
+    runtime = budget.DynamicOutputBudget(
+        runtime_settings,
+        Counter(prompt_tokens),
+    )
+    result = runtime(
+        request={
+            "model": "qwen",
+            "messages": [],
+            "max_tokens": requested_cap,
+        },
+    )
+    assert result is not None
+    assert result["request"]["max_tokens"] == min(free_space, requested_cap)
 
 
 def test_runtime_fallback_reserves_safety_margin(

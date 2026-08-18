@@ -132,9 +132,6 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
             },
         ],
         "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
-        "max_tokens": 8192,
-        "max_completion_tokens": 4096,
-        "max_output_tokens": 2048,
     }
     result = apply_llm_request_middleware(original, session_id="incontext-e2e")
     runtime = get_runtime()
@@ -159,7 +156,7 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
             ),
         },
     ]
-    assert original["max_tokens"] == 8192
+    assert "max_tokens" not in original
 
     assert TokenizerHandler.requests == [
         {
@@ -170,3 +167,18 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
             "tools": original["tools"],
         },
     ]
+
+    bounded = {
+        **original,
+        "max_tokens": 8192,
+        "max_completion_tokens": 4096,
+        "max_output_tokens": 2048,
+    }
+    bounded_result = apply_llm_request_middleware(
+        bounded,
+        session_id="incontext-bounded-e2e",
+    )
+    assert bounded_result.payload["max_tokens"] == 2048
+    assert "max_completion_tokens" not in bounded_result.payload
+    assert "max_output_tokens" not in bounded_result.payload
+    assert bounded["max_tokens"] == 8192

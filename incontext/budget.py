@@ -36,6 +36,19 @@ def compute_max_tokens(
     return remaining if remaining > 0 else None
 
 
+def _requested_output_cap(request: dict[str, Any]) -> int | None:
+    """Return the smallest valid output cap already requested by the caller."""
+
+    caps = [
+        value
+        for field in OUTPUT_BUDGET_FIELDS
+        if not isinstance((value := request.get(field)), bool)
+        and isinstance(value, int)
+        and value > 0
+    ]
+    return min(caps) if caps else None
+
+
 def estimate_request_tokens_rough(request: dict[str, Any]) -> int:
     """Use Hermes' own conservative request estimator as a fallback."""
 
@@ -138,6 +151,9 @@ class DynamicOutputBudget:
                 self.settings.compression_window,
             )
             return None
+        requested_output_cap = _requested_output_cap(request)
+        if requested_output_cap is not None:
+            dynamic_max_tokens = min(dynamic_max_tokens, requested_output_cap)
         rewritten = dict(request)
         for key in OUTPUT_BUDGET_FIELDS:
             rewritten.pop(key, None)

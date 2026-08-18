@@ -22,8 +22,16 @@ The plugin reads the effective compression window from the installed Hermes
 provider-visible prompt, and applies:
 
 ```text
-max_tokens = compression_window - prompt_tokens
+max_tokens = min(
+    caller_max_tokens,
+    compression_window - prompt_tokens,
+)
 ```
+
+When the caller does not provide an output cap, `incontext` uses the whole
+free remainder of the compression window. A smaller positive caller cap is
+preserved, which keeps bounded auxiliary operations such as Hermes context
+summarization from becoming unexpectedly long.
 
 The expression is applied only while its result is positive. A zero or
 negative result is not converted to the invalid sentinel `max_tokens=1`.
