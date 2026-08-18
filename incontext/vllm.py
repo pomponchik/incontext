@@ -100,6 +100,7 @@ class VllmBackend(Backend):
     ) -> int:
         """Return the exact provider-visible prompt token count."""
 
+        truncation_limit = self._prompt_truncation_limit(request)
         encoded = json.dumps(
             self._build_payload(request),
             ensure_ascii=False,
@@ -112,7 +113,11 @@ class VllmBackend(Backend):
             cached = self._cache.get(cache_key)
             if cached is not None:
                 self._cache.move_to_end(cache_key)
-                return cached
+                return (
+                    min(cached, truncation_limit)
+                    if truncation_limit is not None
+                    else cached
+                )
 
         tokenizer_request = urllib.request.Request(
             self._environment.tokenizer_url,
@@ -148,7 +153,7 @@ class VllmBackend(Backend):
             self._cache.move_to_end(cache_key)
             while len(self._cache) > self._cache_entries:
                 self._cache.popitem(last=False)
-        return count
+        return min(count, truncation_limit) if truncation_limit is not None else count
 
     def clear_cache(self) -> None:
         """Discard cached counts without disturbing an in-flight request."""
@@ -215,6 +220,27 @@ class VllmBackend(Backend):
             raise cls.VllmBackendError(
                 f"vLLM /tokenize returned invalid {key}",
             )
+        return value
+
+    @classmethod
+    def _prompt_truncation_limit(cls, request: dict[str, Any]) -> int | None:
+        """Resolve vLLM's positive prompt truncation from the wire request."""
+
+        extra_body = request.get("extra_body")
+        value = (
+            extra_body.get(
+                "truncate_prompt_tokens",
+                request.get("truncate_prompt_tokens"),
+            )
+            if isinstance(extra_body, dict)
+            else request.get("truncate_prompt_tokens")
+        )
+        if value == -1:
+            raise cls.VllmBackendError(
+                "truncate_prompt_tokens=-1 depends on the provider output budget",
+            )
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return None
         return value
 
     @classmethod

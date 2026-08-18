@@ -462,6 +462,100 @@ def test_cache_does_not_bypass_context_length_validation() -> None:
     assert len(opener.calls) == 2
 
 
+def test_count_honors_positive_prompt_truncation() -> None:
+    """Return the count after vLLM truncates a long rendered prompt.
+
+    The tokenize endpoint reports the complete rendered prompt, whereas chat
+    generation applies ``truncate_prompt_tokens`` before inference.  Capping
+    the raw exact count reproduces the provider-visible input size and avoids
+    unnecessary compression caused by budgeting from tokens vLLM discards.
+    """
+
+    backend, _ = make_backend([response(120)])
+    request = {
+        "model": "qwen",
+        "messages": [{"role": "user", "content": "long prompt"}],
+        "truncate_prompt_tokens": 50,
+    }
+
+    assert backend.count(request, context_length=65_536) == 50
+
+
+def test_count_honors_extra_body_prompt_truncation_override() -> None:
+    """Apply the final OpenAI wire value when extra_body overrides truncation.
+
+    OpenAI clients shallow-merge ``extra_body`` after ordinary parameters.
+    Mirroring that precedence keeps counting aligned when a caller replaces a
+    top-level truncation limit without mutating the request passed to Hermes.
+    """
+
+    backend, _ = make_backend([response(120)])
+    request = {
+        "model": "qwen",
+        "messages": [],
+        "truncate_prompt_tokens": 80,
+        "extra_body": {"truncate_prompt_tokens": 30},
+    }
+
+    assert backend.count(request, context_length=65_536) == 30
+
+
+def test_cached_raw_count_supports_distinct_truncation_limits() -> None:
+    """Reuse one rendered count without conflating provider-visible limits.
+
+    Truncation does not alter chat-template rendering, so otherwise identical
+    requests should share the expensive tokenizer response.  The cache must
+    retain the raw count and apply each request's limit afterwards; caching an
+    already-truncated value would let the first caller poison later budgets.
+    """
+
+    backend, opener = make_backend([response(120)])
+    base = {"model": "qwen", "messages": []}
+
+    assert (
+        backend.count(
+            {**base, "truncate_prompt_tokens": 50},
+            context_length=65_536,
+        )
+        == 50
+    )
+    assert (
+        backend.count(
+            {**base, "truncate_prompt_tokens": 20},
+            context_length=65_536,
+        )
+        == 20
+    )
+    assert len(opener.calls) == 1
+
+
+def test_unbounded_prompt_truncation_fails_open_before_tokenization() -> None:
+    """Reject vLLM's dynamic ``-1`` sentinel instead of inventing a count.
+
+    For chat generation ``-1`` maps to the model input allowance after the
+    requested output budget is reserved.  Incontext is itself calculating that
+    budget, so treating the sentinel as a fixed positive cap would be circular
+    and potentially unsafe; raising delegates to the middleware's conservative
+    rough fallback without transmitting the prompt to an inexact endpoint.
+    """
+
+    backend, opener = make_backend()
+
+    with pytest.raises(
+        VllmBackend.VllmBackendError,
+        match="depends on the provider output budget",
+    ):
+        backend.count(
+            {
+                "model": "qwen",
+                "messages": [],
+                "truncate_prompt_tokens": -1,
+            },
+            context_length=65_536,
+        )
+    assert opener.calls == []
+
+
 def test_default_opener_is_resolved_at_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
