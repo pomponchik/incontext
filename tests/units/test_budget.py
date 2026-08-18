@@ -384,6 +384,31 @@ def test_runtime_ignores_unsupported_request_shapes(
     assert runtime(request=payload) is None
 
 
+def test_runtime_ignores_request_for_a_different_model(
+    runtime_settings: Settings,
+) -> None:
+    """Never apply the primary tokenizer and window after a model switch.
+
+    Hermes can route a turn to a session override or fallback model while the
+    process remains alive.  Without a separately configured backend and
+    compression boundary for that model, fail-open is safer than computing an
+    apparently exact cap from the primary model's tokenizer.
+    """
+
+    counter = Counter(100)
+    runtime = budget.DynamicOutputBudget(runtime_settings, counter)
+
+    result = runtime(
+        request={
+            "model": "fallback-model",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    assert result is None
+    assert counter.requests == []
+
+
 @given(
     small=st.integers(min_value=1, max_value=40_000),
     growth=st.integers(min_value=1, max_value=40_000),

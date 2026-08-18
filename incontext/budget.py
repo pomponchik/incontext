@@ -105,6 +105,8 @@ class DynamicOutputBudget:
             list,
         ):
             return None
+        if request.get("model") != self.settings.model_name:
+            return None
 
         source = self.backend.source
         safety_margin = 0
