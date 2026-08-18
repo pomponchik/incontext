@@ -158,6 +158,33 @@ def test_auxiliary_wrapper_accepts_additive_hermes_parameters(
     assert result["task"] == "compression"
 
 
+def test_auxiliary_variadic_builder_without_optional_output_cap() -> None:
+    """Resolve omitted names safely from a generic ``**kwargs`` signature.
+
+    Decorators and future Hermes adapters may expose the request builder as a
+    variadic callable.  When no caller cap is present, argument discovery must
+    fall through cleanly and still apply the full dynamic remainder rather than
+    mistaking an empty kwargs mapping for an incompatible signature.
+    """
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        **options: Any,
+    ) -> dict[str, Any]:
+        del provider, options
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(runtime(Counter(12_345)), build)(
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "title"}],
+    )
+
+    assert result["max_tokens"] == 64_000 - 12_345
+
+
 def test_auxiliary_wrapper_preserves_hermes_output_field() -> None:
     """Respect a provider-specific cap already emitted by Hermes.
 
