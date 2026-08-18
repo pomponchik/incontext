@@ -33,6 +33,14 @@ free remainder of the compression window. A smaller positive caller cap is
 preserved, which keeps bounded auxiliary operations such as Hermes context
 summarization from becoming unexpectedly long.
 
+Hermes auxiliary calls (including context-compression summaries, generated
+titles, and vision helpers) do not pass through the public `llm_request`
+middleware. Hermes also omits `max_tokens` for most custom providers. The
+plugin therefore wraps Hermes' auxiliary request builder at registration time:
+those requests receive the same exact budget, and an explicit smaller caller
+cap is not lost. If exact counting cannot produce a safe result, the wrapper
+leaves Hermes' original request unchanged.
+
 The expression is applied only while its result is positive. A zero or
 negative result is not converted to the invalid sentinel `max_tokens=1`.
 Instead, incontext installs the same exact counter into Hermes' pre-API

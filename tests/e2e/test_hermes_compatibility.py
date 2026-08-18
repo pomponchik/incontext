@@ -182,3 +182,32 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
     assert "max_completion_tokens" not in bounded_result.payload
     assert "max_output_tokens" not in bounded_result.payload
     assert bounded["max_tokens"] == 8192
+
+    # Hermes' auxiliary builder intentionally drops max_tokens for custom
+    # providers. The plugin must cover this path as well as public middleware,
+    # otherwise compression summaries silently regain the provider's full
+    # context remainder.
+    from agent.auxiliary_client import (  # type: ignore[import-not-found]  # noqa: PLC0415
+        _build_call_kwargs,
+    )
+
+    auxiliary_bounded = _build_call_kwargs(
+        "custom",
+        "qwen-e2e",
+        [{"role": "user", "content": "Bound this compression summary"}],
+        max_tokens=2048,
+        base_url="http://inference.invalid/v1",
+    )
+    assert auxiliary_bounded["max_tokens"] == 2048
+
+    auxiliary_dynamic = _build_call_kwargs(
+        "custom",
+        "qwen-e2e",
+        [{"role": "user", "content": "Budget this title dynamically"}],
+        base_url="http://inference.invalid/v1",
+    )
+    assert auxiliary_dynamic["max_tokens"] == (
+        runtime.settings.compression_window - TokenizerHandler.prompt_tokens
+    )
+
+    assert len(TokenizerHandler.requests) == 4

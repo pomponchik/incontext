@@ -6,6 +6,7 @@ import logging
 import threading
 from typing import Any
 
+from .auxiliary import install as install_auxiliary_budget
 from .backend import backends
 from .budget import DynamicOutputBudget
 from .preflight import install as install_exact_preflight
@@ -51,6 +52,7 @@ def register(ctx: Any) -> None:
 
     runtime = get_runtime()
     install_exact_preflight(runtime)
+    install_auxiliary_budget(runtime)
     ctx.register_middleware("llm_request", apply_incontext)
     LOGGER.info(
         "incontext registered context=%d compression_window=%d",

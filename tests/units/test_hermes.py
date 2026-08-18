@@ -103,9 +103,13 @@ def test_register_validates_and_registers_middleware(
     ), mock.patch.object(
         hermes,
         "install_exact_preflight",
-    ) as install:
+    ) as install_preflight, mock.patch.object(
+        hermes,
+        "install_auxiliary_budget",
+    ) as install_auxiliary:
         hermes.register(context)
-    install.assert_called_once_with(runtime)
+    install_preflight.assert_called_once_with(runtime)
+    install_auxiliary.assert_called_once_with(runtime)
     assert context.calls == [("llm_request", hermes.apply_incontext)]
 
 
