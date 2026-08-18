@@ -62,8 +62,8 @@ python -m pip install 'incontext>=0.0.2'
 hermes plugins enable incontext
 ```
 
-Until that safety-complete release is published, install the reviewed `develop`
-revision:
+Until that safety-complete release is published, install the current `develop`
+branch:
 
 ```bash
 python -m pip install 'git+https://github.com/pomponchik/incontext.git@develop'

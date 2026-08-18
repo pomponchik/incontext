@@ -52,3 +52,18 @@ def test_readme_pypi_install_cannot_select_an_older_release() -> None:
 
     assert f"python -m pip install 'incontext>={current}'" in contents
     assert "Until the first PyPI release" not in contents
+
+
+def test_readme_does_not_describe_a_mutable_branch_as_reviewed_revision() -> None:
+    """Avoid an immutable-sounding assurance for a moving Git branch.
+
+    The development installation intentionally tracks ``develop`` so a commit
+    hash cannot remain current in this repository's own README.  Calling that
+    mutable target a reviewed revision would overstate what the command pins;
+    the text must identify it honestly as the current branch instead.
+    """
+
+    contents = README.read_text(encoding="utf-8")
+
+    assert "install the current `develop`\nbranch" in contents
+    assert "reviewed `develop`" not in contents
