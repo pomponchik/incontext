@@ -210,6 +210,46 @@ def test_runtime_preserves_the_provider_selected_output_field(field: str) -> Non
     )
 
 
+def test_runtime_removes_extra_body_output_cap_override() -> None:
+    """Prevent OpenAI's ``extra_body`` merge from undoing the dynamic budget.
+
+    The OpenAI client shallow-merges ``extra_body`` after normal parameters, so
+    an output alias left there wins on the HTTP wire.  Incontext must include it
+    when selecting the smallest caller cap, move the safe result to the same
+    top-level field, and remove every nested alias without mutating the input.
+    """
+
+    runtime_settings = Settings(
+        model_name="qwen",
+        context_length=1000,
+        compression_window=800,
+        fallback_margin_tokens=10,
+    )
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(100))
+    request = {
+        "model": "qwen",
+        "messages": [],
+        "extra_body": {
+            "max_completion_tokens": 600,
+            "max_tokens": 100_000,
+            "chat_template_kwargs": {"enable_thinking": True},
+        },
+    }
+
+    result = runtime(request=request)
+
+    assert result is not None
+    assert result["request"]["max_completion_tokens"] == 600
+    assert result["request"]["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+    assert request["extra_body"] == {
+        "max_completion_tokens": 600,
+        "max_tokens": 100_000,
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+
+
 @pytest.mark.parametrize(
     "invalid_cap",
     [None, True, False, 0, -1, 1.5, "2048"],

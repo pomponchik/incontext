@@ -39,10 +39,15 @@ def compute_max_tokens(
 def _requested_output_cap(request: dict[str, Any]) -> tuple[str, int] | None:
     """Return the field and smallest valid cap requested by the caller."""
 
+    extra_body = request.get("extra_body")
+    sources = [request]
+    if isinstance(extra_body, dict):
+        sources.append(extra_body)
     caps = [
         (field, value)
+        for source in sources
         for field in OUTPUT_BUDGET_FIELDS
-        if not isinstance((value := request.get(field)), bool)
+        if not isinstance((value := source.get(field)), bool)
         and isinstance(value, int)
         and value > 0
     ]
@@ -159,6 +164,12 @@ class DynamicOutputBudget:
         rewritten = dict(request)
         for key in OUTPUT_BUDGET_FIELDS:
             rewritten.pop(key, None)
+        extra_body = rewritten.get("extra_body")
+        if isinstance(extra_body, dict):
+            cleaned_extra_body = dict(extra_body)
+            for key in OUTPUT_BUDGET_FIELDS:
+                cleaned_extra_body.pop(key, None)
+            rewritten["extra_body"] = cleaned_extra_body
         rewritten[output_field] = dynamic_max_tokens
 
         LOGGER.info(
