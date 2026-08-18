@@ -723,3 +723,26 @@ def test_install_reports_absent_hermes(caplog: pytest.LogCaptureFixture) -> None
         if auxiliary is not None:
             sys.modules["agent.auxiliary_client"] = auxiliary
     assert "Hermes is not installed" in caplog.text
+
+
+def test_install_skips_a_missing_private_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Keep public middleware usable when Hermes moves its private builder.
+
+    Importing ``agent.auxiliary_client`` only proves that Hermes is installed;
+    it does not guarantee that the installed version still exposes
+    ``_build_call_kwargs``.  This monkeypatch is an optional compatibility
+    layer, so a missing private binding must warn and return ``None`` rather
+    than raising ``KeyError`` and rolling back the stable public middleware.
+    """
+
+    agent = types.ModuleType("agent")
+    agent.__path__ = []  # type: ignore[attr-defined]
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+
+    assert install(lambda: None) is None
+    assert "Hermes auxiliary builder API changed" in caplog.text

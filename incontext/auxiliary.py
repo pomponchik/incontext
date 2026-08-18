@@ -136,7 +136,13 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
 
     global _install_count, _installed_wrapper  # noqa: PLW0603
     with _install_lock:
-        current = auxiliary_client.__dict__["_build_call_kwargs"]
+        current = auxiliary_client.__dict__.get("_build_call_kwargs")
+        if not callable(current):
+            LOGGER.warning(
+                "incontext auxiliary budgeting unavailable: "
+                "Hermes auxiliary builder API changed"
+            )
+            return None
         output_cap_selector = auxiliary_client.__dict__.get(
             "auxiliary_max_tokens_param"
         )
