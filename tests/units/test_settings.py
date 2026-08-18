@@ -108,6 +108,18 @@ def test_strict_float_rejects_malformed_string() -> None:
         settings._strict_float("invalid", "value", minimum_exclusive=0)
 
 
+def test_strict_float_wraps_unrepresentable_integer() -> None:
+    """Convert a YAML-sized integer overflow into the settings error contract.
+
+    Python and YAML accept integers much larger than a platform float.  Such a
+    configured threshold must fail as ``SettingsError`` like every other
+    malformed numeric value instead of leaking ``OverflowError`` from startup.
+    """
+
+    with pytest.raises(settings.SettingsError, match="must be numeric"):
+        settings._strict_float(10**10_000, "value", minimum_exclusive=0)
+
+
 @pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
 def test_strict_float_rejects_non_positive_or_non_finite(value: float) -> None:
     with pytest.raises(settings.SettingsError, match="must be greater"):
@@ -178,6 +190,17 @@ def test_normalized_model_thresholds_keeps_only_finite_numbers() -> None:
         },
     ) == {"qwen": 0.75, "123": 1.0}
     assert settings._normalized_model_thresholds([]) == {}
+
+
+def test_normalized_model_thresholds_skips_unrepresentable_integer() -> None:
+    """Ignore per-model thresholds that cannot be represented as finite floats.
+
+    A single arbitrary-precision YAML integer must not abort loading otherwise
+    valid model overrides; it belongs to the same rejected category as NaN and
+    infinity and is therefore omitted from the normalized mapping.
+    """
+
+    assert settings._normalized_model_thresholds({"huge": 10**10_000}) == {}
 
 
 def test_construct_compressor_filters_unknown_keywords() -> None:

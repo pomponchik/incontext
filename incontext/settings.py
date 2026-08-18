@@ -98,7 +98,7 @@ def _strict_float(
         raise SettingsError(f"{name} must be numeric")
     try:
         parsed = float(value)
-    except ValueError as exc:
+    except (OverflowError, ValueError) as exc:
         raise SettingsError(f"{name} must be numeric") from exc
     if not math.isfinite(parsed) or parsed <= minimum_exclusive:
         raise SettingsError(f"{name} must be greater than {minimum_exclusive}")
@@ -121,12 +121,14 @@ def _normalized_model_thresholds(value: Any) -> dict[str, float]:
         return {}
     normalized: dict[str, float] = {}
     for key, threshold in value.items():
-        if (
-            isinstance(threshold, (int, float))
-            and not isinstance(threshold, bool)
-            and math.isfinite(float(threshold))
-        ):
-            normalized[str(key)] = float(threshold)
+        if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
+            continue
+        try:
+            converted = float(threshold)
+        except OverflowError:
+            continue
+        if math.isfinite(converted):
+            normalized[str(key)] = converted
     return normalized
 
 
