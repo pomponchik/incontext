@@ -88,9 +88,46 @@ def test_build_payload_includes_tools_and_template_kwargs() -> None:
     assert payload["chat_template_kwargs"] == {"enable_thinking": True}
 
 
+def test_build_payload_mirrors_every_prompt_affecting_vllm_option() -> None:
+    """Tokenize exactly the chat prompt that vLLM will use for generation.
+
+    Continuations, custom templates, special-token policy, multimodal processor
+    options, and template kwargs can all alter the rendered prompt.  OpenAI's
+    client merges ``extra_body`` over standard request fields, so the tokenizer
+    payload must forward the same options with the same precedence instead of
+    silently restoring ``add_generation_prompt=True``.
+    """
+
+    request = {
+        "model": "qwen",
+        "messages": [{"role": "assistant", "content": "prefix"}],
+        "add_generation_prompt": True,
+        "chat_template_kwargs": {"source": "top-level"},
+        "extra_body": {
+            "add_generation_prompt": False,
+            "continue_final_message": True,
+            "add_special_tokens": False,
+            "chat_template": "{{ messages }}",
+            "chat_template_kwargs": {"enable_thinking": False},
+            "mm_processor_kwargs": {"num_crops": 4},
+        },
+    }
+
+    assert VllmBackend._build_payload(request) == {
+        "model": "qwen",
+        "messages": request["messages"],
+        "add_generation_prompt": False,
+        "continue_final_message": True,
+        "add_special_tokens": False,
+        "chat_template": "{{ messages }}",
+        "chat_template_kwargs": {"enable_thinking": False},
+        "mm_processor_kwargs": {"num_crops": 4},
+    }
+
+
 @pytest.mark.parametrize(
     ("tools", "extra_body"),
-    [([], None), ("invalid", []), (None, {"chat_template_kwargs": []})],
+    [([], None), ("invalid", []), (None, None)],
 )
 def test_build_payload_ignores_non_effective_optional_fields(
     tools: Any,
