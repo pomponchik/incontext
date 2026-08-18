@@ -371,7 +371,14 @@ class VllmBackend(Backend):
                 or (
                     isinstance(part, dict)
                     and part.get("type")
-                    not in {"text", "input_text", "output_text", "refusal", "thinking"}
+                    not in {
+                        "text",
+                        "input_text",
+                        "output_text",
+                        "refusal",
+                        "thinking",
+                        "tool_reference",
+                    }
                 )
                 for part in content
             ):

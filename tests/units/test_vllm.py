@@ -803,6 +803,32 @@ def test_count_truncates_vllm_structured_text_content_parts(
     assert backend.count(request, context_length=65_536) == 50
 
 
+def test_count_truncates_vllm_tool_reference_content_parts() -> None:
+    """Apply text-only prompt truncation to deferred tool references.
+
+    vLLM explicitly passes ``tool_reference`` parts through chat-template
+    expansion without creating media placeholders.  Generation therefore
+    truncates the final token sequence exactly like other structured text.
+    Treating the reference as media keeps the raw tokenizer count, causing
+    premature compression and a needlessly smaller output allowance.
+    """
+
+    backend, _ = make_backend([response(120)])
+    request = {
+        "model": "qwen",
+        "messages": [
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": [{"type": "tool_reference", "name": "lookup"}],
+            },
+        ],
+        "truncate_prompt_tokens": 50,
+    }
+
+    assert backend.count(request, context_length=65_536) == 50
+
+
 def test_cached_raw_count_supports_distinct_truncation_limits() -> None:
     """Reuse one rendered count without conflating provider-visible limits.
 
