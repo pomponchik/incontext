@@ -267,6 +267,53 @@ def test_load_settings_passes_modern_compression_options() -> None:
     assert call["threshold_tokens_cap"] == 50_000
 
 
+def test_load_settings_uses_hermes_model_specific_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Derive the window from the same effective threshold as Hermes itself.
+
+    Hermes applies installed model policies before constructing its live
+    compressor (for example, Trinity and Codex autoraises).  Passing only the
+    raw global config would make incontext use a different compression boundary
+    even though both instantiate the same ``ContextCompressor`` class.
+    """
+
+    class ThresholdAwareCompressor:
+        def __init__(
+            self,
+            *,
+            threshold_percent: float,
+            config_context_length: int,
+            **options: Any,
+        ) -> None:
+            del options
+            self.context_length = config_context_length
+            self.threshold_tokens = int(
+                config_context_length * threshold_percent,
+            )
+
+    calls: list[tuple[float, str, str, Mapping[str, Any]]] = []
+
+    def effective(
+        configured: float,
+        *,
+        model: str,
+        provider: str,
+        compression: Mapping[str, Any],
+    ) -> float:
+        calls.append((configured, model, provider, compression))
+        return 0.75
+
+    monkeypatch.setattr(settings, "_effective_compression_threshold", effective)
+
+    result = load(compressor=ThresholdAwareCompressor)
+
+    assert result.compression_window == 49_152
+    assert calls == [
+        (0.5, "qwen-test", "custom", base_config["compression"]),
+    ]
+
+
 def test_load_settings_reserves_hermes_configured_output_budget() -> None:
     """Reconstruct the same compression boundary as the live Hermes agent.
 

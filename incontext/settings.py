@@ -172,6 +172,57 @@ def _load_hermes_components() -> tuple[Callable[[], Any], type[Any]]:
     return load_config, ContextCompressor
 
 
+def _effective_compression_threshold(
+    configured: float,
+    *,
+    model: str,
+    provider: str,
+    compression: Mapping[str, Any],
+) -> float:
+    """Reuse Hermes' installed model-specific threshold policy when available."""
+
+    try:
+        from agent.agent_init import (  # type: ignore[import-not-found]  # noqa: PLC0415
+            _resolve_compression_threshold,
+        )
+        from agent.auxiliary_client import (  # type: ignore[import-not-found]  # noqa: PLC0415
+            _compression_threshold_for_model,
+            _is_codex_gpt54_or_gpt55,
+            _is_codex_spark,
+        )
+    except (ImportError, AttributeError):
+        return configured
+
+    try:
+        allow_codex_autoraise = str(
+            compression.get("codex_gpt55_autoraise", True),
+        ).lower() in {"true", "1", "yes"}
+        model_threshold = _compression_threshold_for_model(
+            model,
+            provider,
+            allow_codex_gpt55_autoraise=allow_codex_autoraise,
+        )
+        effective, _ = _resolve_compression_threshold(
+            configured,
+            model_threshold,
+            model=model,
+            is_codex_autoraise=(
+                _is_codex_gpt54_or_gpt55(model, provider)
+                or _is_codex_spark(model, provider)
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        # Hermes itself treats model-policy lookup as best effort and keeps the
+        # configured global threshold if those private helpers fail.
+        return configured
+    return _strict_float(
+        effective,
+        "Hermes effective compression threshold",
+        minimum_exclusive=0.0,
+        maximum_inclusive=1.0,
+    )
+
+
 def load_settings(
     *,
     environment: Environment | None = None,
@@ -222,6 +273,12 @@ def load_settings(
         "Hermes compression.threshold",
         minimum_exclusive=0.0,
         maximum_inclusive=1.0,
+    )
+    threshold = _effective_compression_threshold(
+        threshold,
+        model=model_name.strip(),
+        provider=provider,
+        compression=compression,
     )
 
     try:
