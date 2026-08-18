@@ -338,6 +338,20 @@ def _effective_max_tokens(
     return None
 
 
+def _validate_context_engine(
+    context: Mapping[str, Any],
+    window_override: int,
+) -> None:
+    """Require a known boundary for non-default Hermes context engines."""
+
+    context_engine = str(context.get("engine") or "compressor").strip().lower()
+    if window_override == 0 and context_engine != "compressor":
+        raise SettingsError(
+            "Hermes context.engine must be compressor unless an explicit "
+            "compression_window_tokens override is configured",
+        )
+
+
 def load_settings(
     *,
     environment: Optional[Environment] = None,
@@ -363,6 +377,7 @@ def load_settings(
 
     model = _section(raw_config, "model")
     compression = _section(raw_config, "compression")
+    context = _section(raw_config, "context")
     providers = _section(raw_config, "providers")
     model_name = model.get("default")
     if not isinstance(model_name, str) or not model_name.strip():
@@ -395,6 +410,7 @@ def load_settings(
     max_tokens = _effective_max_tokens(model, provider_config, hermes_environment)
 
     window_override = environment.compression_window_tokens
+    _validate_context_engine(context, window_override)
     if window_override == 0:
         compressor = _construct_compressor(
             compressor_class,

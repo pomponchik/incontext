@@ -706,6 +706,42 @@ def test_load_settings_explicit_window_avoids_compressor_construction() -> None:
     assert result.compression_window == 50_000
 
 
+def test_load_settings_rejects_non_builtin_context_engine() -> None:
+    """Never derive a budget from an inactive built-in compressor.
+
+    Hermes selects context management through ``context.engine``.  External
+    engines own their compaction threshold and the ``compression`` block is
+    specific to the built-in ``ContextCompressor``.  Constructing that inactive
+    class would silently give request middleware an unrelated window, which can
+    truncate valid output or cross the active engine's real boundary.
+    """
+
+    config = {**base_config, "context": {"engine": "lcm"}}
+
+    with pytest.raises(
+        settings.SettingsError,
+        match=r"context\.engine.*compressor",
+    ):
+        load(config=config)
+
+
+def test_explicit_window_supports_external_context_engine_safely() -> None:
+    """Allow an external engine only when its real boundary is supplied.
+
+    A positive incontext override is an explicit operator assertion of the
+    selected engine's active threshold.  In that case no inactive built-in
+    compressor is constructed, so the plugin can budget against the stated
+    external boundary without inventing engine-specific policy.
+    """
+
+    result = load(
+        environment={"INCONTEXT_COMPRESSION_WINDOW_TOKENS": "50000"},
+        config={**base_config, "context": {"engine": "lcm"}},
+    )
+
+    assert result.compression_window == 50_000
+
+
 def test_load_settings_prefers_new_environment_names() -> None:
     environment = {
         "INCONTEXT_BACKEND": "other_backend",
@@ -822,7 +858,7 @@ def test_load_settings_rejects_non_mapping_config() -> None:
         load(config=[])
 
 
-@pytest.mark.parametrize("section", ["model", "compression"])
+@pytest.mark.parametrize("section", ["model", "compression", "context", "providers"])
 def test_load_settings_rejects_non_mapping_sections(section: str) -> None:
     config = dict(base_config)
     config[section] = []
