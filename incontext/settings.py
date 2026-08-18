@@ -327,6 +327,37 @@ def _provider_enabled(configured: Mapping[str, Any]) -> bool:
     return bool(flag)
 
 
+def _modern_provider_endpoint(configured: Mapping[str, Any]) -> Any:
+    """Resolve endpoint aliases in Hermes' modern provider precedence."""
+
+    return (
+        configured.get("api")
+        or configured.get("url")
+        or configured.get("base_url")
+        or configured.get("baseUrl")
+    )
+
+
+def _normalized_legacy_provider(
+    configured: Mapping[str, Any],
+) -> Optional[Mapping[str, Any]]:
+    """Return Hermes' canonical view of one legacy provider entry."""
+
+    endpoint = (
+        configured.get("base_url")
+        or configured.get("baseUrl")
+        or configured.get("url")
+        or configured.get("api")
+    )
+    if not endpoint:
+        return None
+    normalized = dict(configured)
+    for alias in ("api", "url", "base_url", "baseUrl"):
+        normalized.pop(alias, None)
+    normalized["base_url"] = endpoint
+    return normalized
+
+
 def _named_provider_config(
     providers: Mapping[str, Any],
     selector: str,
@@ -345,6 +376,8 @@ def _named_provider_config(
         if not isinstance(configured, Mapping):
             raise SettingsError("Hermes providers entry must be a mapping")
         if not _provider_enabled(configured):
+            continue
+        if not _modern_provider_endpoint(configured):
             continue
         return configured
     return None
@@ -366,7 +399,9 @@ def _legacy_provider_config(
             configured.get("name"),
             configured.get("provider_key"),
         ):
-            return configured
+            normalized = _normalized_legacy_provider(configured)
+            if normalized is not None:
+                return normalized
     return None
 
 
@@ -483,11 +518,7 @@ def _effective_provider_route(
             if not isinstance(configured_provider, Mapping):
                 raise SettingsError("Hermes providers entry must be a mapping")
             provider_config = configured_provider
-    provider_endpoint = (
-        provider_config.get("api")
-        or provider_config.get("url")
-        or provider_config.get("base_url")
-    )
+    provider_endpoint = _modern_provider_endpoint(provider_config)
     base_url = normalize_base_url(
         provider_endpoint if named else model.get("base_url") or provider_endpoint,
     )

@@ -575,6 +575,115 @@ def test_named_provider_uses_hermes_effective_endpoint(
     assert result.base_url == "https://inference.example/v1"
 
 
+def test_named_provider_uses_hermes_camelcase_base_url_alias() -> None:
+    """Retain endpoint scoping for Hermes-normalized provider fields.
+
+    Hermes accepts ``baseUrl`` in hand-written modern entries and maps it to
+    ``base_url`` before runtime resolution.  Dropping that endpoint leaves only
+    the shared provider label ``custom``, allowing a same-model fallback to be
+    budgeted with the primary tokenizer and context window.
+    """
+
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": "custom:edge",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            "providers": {
+                "edge": {
+                    "baseUrl": "https://INFERENCE.EXAMPLE:443/v1/",
+                    "defaultModel": "qwen-test",
+                },
+            },
+        },
+    )
+
+    assert result.base_url == "https://inference.example/v1"
+
+
+@pytest.mark.parametrize(
+    ("provider_entry", "expected"),
+    [
+        (
+            {
+                "name": "Edge",
+                "base_url": "https://LIVE.EXAMPLE:443/v1/",
+                "url": "https://older.invalid/v1",
+                "api": "https://stale.invalid/v1",
+            },
+            "https://live.example/v1",
+        ),
+        (
+            {"name": "Edge", "baseUrl": "https://CAMEL.EXAMPLE:443/v1/"},
+            "https://camel.example/v1",
+        ),
+        (
+            {"name": "Edge", "url": "https://URL.EXAMPLE:443/v1/"},
+            "https://url.example/v1",
+        ),
+        (
+            {"name": "Edge", "api": "https://API.EXAMPLE:443/v1/"},
+            "https://api.example/v1",
+        ),
+    ],
+)
+def test_legacy_provider_uses_hermes_normalized_endpoint(
+    provider_entry: Mapping[str, Any],
+    expected: str,
+) -> None:
+    """Resolve raw legacy URL aliases through Hermes' canonical precedence.
+
+    Legacy entries can retain multiple fields after migrations.  Hermes makes
+    ``base_url`` authoritative, supports ``baseUrl``, then falls back to
+    ``url`` and ``api``.  Using modern precedence stores a different route and
+    makes middleware reject the endpoint the running agent actually calls.
+    """
+
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": "custom:edge",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            "custom_providers": [provider_entry],
+        },
+    )
+
+    assert result.base_url == expected
+
+
+def test_incomplete_provider_entries_fall_through_to_usable_legacy_entry() -> None:
+    """Ignore named entries that cannot form a runtime endpoint.
+
+    Hermes continues through both schemas when matching records have no usable
+    URL.  Treating either incomplete record as selected removes endpoint
+    isolation and hides a valid legacy route with the same durable identity.
+    """
+
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": "custom:edge",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            "providers": {"edge": {"name": "Edge"}},
+            "custom_providers": [
+                {"name": "Edge"},
+                {"name": "Edge", "base_url": "https://live.example/v1"},
+            ],
+        },
+    )
+
+    assert result.base_url == "https://live.example/v1"
+
+
 @pytest.mark.parametrize("alias", ["vllm", "ollama", "llamacpp"])
 def test_load_settings_uses_live_identity_for_local_provider_alias(alias: str) -> None:
     """Canonicalize Hermes local-provider aliases before route scoping.
