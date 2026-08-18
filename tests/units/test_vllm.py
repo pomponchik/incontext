@@ -125,9 +125,38 @@ def test_build_payload_mirrors_every_prompt_affecting_vllm_option() -> None:
     }
 
 
+def test_build_payload_applies_extra_body_to_core_chat_fields() -> None:
+    """Mirror OpenAI's final shallow merge for model, messages, and tools.
+
+    ``extra_body`` wins over generated request parameters on the HTTP wire.
+    Tokenizing the pre-merge values can count a different model, transcript, or
+    tool schema; an explicit empty tool list must also remain distinguishable
+    from an omitted field for vLLM's chat renderer.
+    """
+
+    override_messages = [{"role": "user", "content": "override"}]
+    request = {
+        "model": "original",
+        "messages": [{"role": "user", "content": "original"}],
+        "tools": [{"type": "function", "function": {"name": "original"}}],
+        "extra_body": {
+            "model": "override",
+            "messages": override_messages,
+            "tools": [],
+        },
+    }
+
+    assert VllmBackend._build_payload(request) == {
+        "model": "override",
+        "messages": override_messages,
+        "tools": [],
+        "add_generation_prompt": True,
+    }
+
+
 @pytest.mark.parametrize(
     ("tools", "extra_body"),
-    [([], None), ("invalid", []), (None, None)],
+    [("invalid", []), (None, None)],
 )
 def test_build_payload_ignores_non_effective_optional_fields(
     tools: Any,
@@ -138,6 +167,21 @@ def test_build_payload_ignores_non_effective_optional_fields(
     )
     assert "tools" not in payload
     assert "chat_template_kwargs" not in payload
+
+
+def test_build_payload_preserves_explicit_empty_tools() -> None:
+    """Keep ``tools=[]`` because it survives into vLLM's wire request.
+
+    Treating an explicit empty list as field absence changes the Pydantic input
+    from a list to ``None`` and can select different server-side rendering
+    defaults, so exact tokenization must retain the caller's shape.
+    """
+
+    payload = VllmBackend._build_payload(
+        {"model": "qwen", "messages": [], "tools": []},
+    )
+
+    assert payload["tools"] == []
 
 
 @pytest.mark.parametrize("value", [None, True, False, 0, -1, "1", 1.5])

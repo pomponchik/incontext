@@ -158,14 +158,15 @@ class VllmBackend(Backend):
 
     @staticmethod
     def _build_payload(request: dict[str, Any]) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "model": request.get("model"),
-            "messages": request.get("messages"),
-        }
-        tools = request.get("tools")
-        if isinstance(tools, list) and tools:
-            payload["tools"] = tools
         extra_body = request.get("extra_body")
+        extra_body = extra_body if isinstance(extra_body, dict) else {}
+        payload: dict[str, Any] = {
+            "model": extra_body.get("model", request.get("model")),
+            "messages": extra_body.get("messages", request.get("messages")),
+        }
+        tools = extra_body.get("tools", request.get("tools"))
+        if isinstance(tools, list):
+            payload["tools"] = tools
         prompt_options = (
             "add_generation_prompt",
             "continue_final_message",
@@ -177,7 +178,7 @@ class VllmBackend(Backend):
         for option in prompt_options:
             if option in request:
                 payload[option] = request[option]
-            if isinstance(extra_body, dict) and option in extra_body:
+            if option in extra_body:
                 # The OpenAI client merges extra_body over its generated JSON;
                 # mirror that precedence for the tokenizer request.
                 payload[option] = extra_body[option]
