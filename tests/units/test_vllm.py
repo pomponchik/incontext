@@ -212,6 +212,26 @@ def test_build_payload_preserves_explicit_thinking_override() -> None:
     }
 
 
+def test_build_payload_forwards_invalid_template_kwargs_for_vllm_validation() -> None:
+    """Do not silently replace a malformed provider-visible template value.
+
+    OpenAI's shallow merge sends the value to vLLM, whose Pydantic contract owns
+    validation.  Keeping the invalid shape in ``/tokenize`` makes exact counting
+    fail open consistently instead of tokenizing defaults for an inference
+    request that will later be rejected or interpreted differently.
+    """
+
+    payload = VllmBackend._build_payload(
+        {
+            "model": "qwen",
+            "messages": [],
+            "extra_body": {"chat_template_kwargs": ["invalid"]},
+        },
+    )
+
+    assert payload["chat_template_kwargs"] == ["invalid"]
+
+
 @pytest.mark.parametrize(
     ("tools", "extra_body"),
     [("invalid", []), (None, None)],
