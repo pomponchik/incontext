@@ -741,7 +741,7 @@ def test_count_uses_disaggregated_decode_prompt_token_ids() -> None:
 
 @pytest.mark.parametrize(
     "token_ids",
-    [None, [], [True], [-1], ["1"]],
+    [False, [True], [-1], ["1"]],
 )
 def test_count_rejects_invalid_disaggregated_prompt_token_ids(
     token_ids: Any,
@@ -769,6 +769,34 @@ def test_count_rejects_invalid_disaggregated_prompt_token_ids(
             context_length=65_536,
         )
     assert opener.calls == []
+
+
+@pytest.mark.parametrize("token_ids", [None, []])
+def test_falsy_disaggregated_prompt_ids_render_messages_normally(
+    token_ids: Any,
+) -> None:
+    """Treat falsy decode-side IDs as absent exactly as vLLM does.
+
+    vLLM consumes ``prompt_token_ids`` with an ``or None`` fallback and follows
+    normal message rendering for null or an empty list.  Rejecting those valid
+    sentinels disables exact counting and applies the rough fallback margin to
+    a request generation can serve normally.
+    """
+
+    backend, opener = make_backend([response(120)])
+
+    assert (
+        backend.count(
+            {
+                "model": "qwen",
+                "messages": [{"role": "user", "content": "render me"}],
+                "kv_transfer_params": {"prompt_token_ids": token_ids},
+            },
+            context_length=65_536,
+        )
+        == 120
+    )
+    assert len(opener.calls) == 1
 
 
 def test_count_ignores_kv_transfer_metadata_without_reused_prompt_ids() -> None:

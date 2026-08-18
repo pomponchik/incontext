@@ -311,15 +311,11 @@ class VllmBackend(Backend):
         if not isinstance(params, dict) or "prompt_token_ids" not in params:
             return None
         token_ids = params["prompt_token_ids"]
-        if (
-            not isinstance(token_ids, list)
-            or not token_ids
-            or any(
-                isinstance(token_id, bool)
-                or not isinstance(token_id, int)
-                or token_id < 0
-                for token_id in token_ids
-            )
+        if token_ids is None or token_ids == []:
+            return None
+        if not isinstance(token_ids, list) or any(
+            isinstance(token_id, bool) or not isinstance(token_id, int) or token_id < 0
+            for token_id in token_ids
         ):
             raise cls.VllmBackendError(
                 "kv_transfer_params.prompt_token_ids must be a non-empty "
