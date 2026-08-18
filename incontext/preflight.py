@@ -61,13 +61,17 @@ class _ExactPreflight:
                 "using Hermes rough estimate",
                 type(exc).__name__,
             )
-            return int(
-                self.original(
-                    messages,
-                    system_prompt=system_prompt,
-                    tools=tools,
+            rough_tokens = max(
+                1,
+                int(
+                    self.original(
+                        messages,
+                        system_prompt=system_prompt,
+                        tools=tools,
+                    ),
                 ),
             )
+            return rough_tokens + self.runtime.settings.fallback_margin_tokens
 
 
 def install(runtime: DynamicOutputBudget) -> RoughEstimator | None:

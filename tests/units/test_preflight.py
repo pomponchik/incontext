@@ -167,8 +167,9 @@ def test_preflight_falls_back_when_backend_fails(
 
     The real Hermes estimator declares ``system_prompt`` and ``tools`` after a
     ``*``.  A positional fallback call raises ``TypeError`` precisely when the
-    tokenizer is unavailable, turning the intended fail-open path into a hard
-    agent failure.
+    tokenizer is unavailable.  The conservative fallback margin must also be
+    added here so preflight compresses requests for which the middleware would
+    otherwise find no positive safe budget.
     """
 
     def rough(
@@ -191,7 +192,7 @@ def test_preflight_falls_back_when_backend_fails(
             system_prompt="system fallback",
             tools=[],
         )
-        == 321
+        == 321 + 1024
     )
     assert "TimeoutError" in caplog.text
     assert "secret" not in caplog.text
