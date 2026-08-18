@@ -509,6 +509,69 @@ def test_load_settings_preserves_nonlocal_builtin_provider() -> None:
     assert result.base_url == "https://inference.example/v1"
 
 
+def test_load_settings_uses_hermes_live_identity_for_builtin_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirror the provider identity exposed by Hermes request dispatch.
+
+    Hermes resolves supported aliases such as ``z-ai`` to ``zai`` before
+    constructing ``AIAgent`` and passes that canonical ID to request
+    middleware.  Retaining the configuration spelling makes both primary and
+    auxiliary route guards reject the intended request before exact counting.
+    """
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []  # type: ignore[attr-defined]
+    auth = types.ModuleType("hermes_cli.auth")
+    auth.resolve_provider = (  # type: ignore[attr-defined]
+        lambda provider: "zai" if provider == "z-ai" else provider
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", auth)
+
+    result = load(
+        config={
+            **base_config,
+            "model": {**base_config["model"], "provider": "z-ai"},
+        },
+    )
+
+    assert result.provider == "zai"
+
+
+def test_load_settings_keeps_provider_when_hermes_alias_resolution_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep startup fail-open if Hermes cannot resolve an ordinary selector.
+
+    Provider discovery may involve an optional runtime registry whose lookup
+    can fail while the explicitly configured endpoint remains usable.  Hermes
+    itself treats later provider setup as authoritative, so incontext must
+    preserve the normalized selector rather than disable plugin registration.
+    """
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []  # type: ignore[attr-defined]
+    auth = types.ModuleType("hermes_cli.auth")
+
+    def fail(provider: str) -> str:
+        del provider
+        raise RuntimeError("registry unavailable")
+
+    auth.resolve_provider = fail  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", auth)
+
+    result = load(
+        config={
+            **base_config,
+            "model": {**base_config["model"], "provider": "openai"},
+        },
+    )
+
+    assert result.provider == "openai"
+
+
 def test_load_settings_passes_modern_compression_options() -> None:
     ModernCompressor.calls.clear()
     config = {

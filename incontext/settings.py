@@ -317,6 +317,22 @@ def _named_provider_config(
     return None
 
 
+def _canonical_builtin_provider(provider: str) -> str:
+    """Use Hermes' installed alias registry for ordinary provider selectors."""
+
+    try:
+        from hermes_cli.auth import (  # type: ignore[import-not-found]  # noqa: PLC0415
+            resolve_provider,
+        )
+    except (ImportError, AttributeError):
+        return provider
+    try:
+        resolved = _normalized_provider_selector(resolve_provider(provider))
+    except Exception:  # noqa: BLE001
+        return provider
+    return resolved or provider
+
+
 def _effective_provider_route(
     model: Mapping[str, Any],
     providers: Mapping[str, Any],
@@ -345,6 +361,8 @@ def _effective_provider_route(
             named = True
         elif provider_selector in {"vllm", "ollama", "llamacpp"}:
             provider = "custom"
+        else:
+            provider = _canonical_builtin_provider(provider_selector)
     else:
         configured_provider = providers.get(provider)
         if configured_provider is not None:
