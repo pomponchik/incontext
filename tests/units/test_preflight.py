@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import types
 from typing import Any
 
@@ -348,6 +349,61 @@ def test_preflight_skips_profiles_without_an_active_plugin_owner() -> None:
         == 17
     )
     assert counter.requests == []
+
+
+def test_final_owner_release_cannot_race_active_preflight() -> None:
+    """Keep the final unload from invalidating an in-flight no-GIL lookup.
+
+    The estimator wrapper is process-global, so plugin cleanup can release its
+    last owner while another thread is entering Hermes' preflight estimator.
+    Reading the owner list once for truthiness and again for indexing permits
+    cleanup to replace it with an empty list between those operations on
+    free-threaded CPython.  One snapshot must instead remain valid for the
+    complete lookup.
+    """
+
+    checked = threading.Event()
+    resume = threading.Event()
+
+    class BlockingOwners(list):
+        def __bool__(self) -> bool:
+            checked.set()
+            assert resume.wait(timeout=2)
+            return super().__len__() != 0
+
+    def rough(
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+    ) -> int:
+        del messages, system_prompt, tools
+        return 7
+
+    resolver = lambda: None  # noqa: E731
+    wrapper = _ExactPreflight(resolver, rough)
+    owner = object()
+    wrapper.acquire(owner, resolver)
+    wrapper._owners = BlockingOwners(wrapper._owners)
+    results: list[int] = []
+    errors: list[BaseException] = []
+
+    def estimate() -> None:
+        try:
+            results.append(wrapper([]))
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    worker = threading.Thread(target=estimate)
+    worker.start()
+    assert checked.wait(timeout=2)
+    wrapper.release(owner)
+    resume.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert results == [7]
 
 
 def test_cleanup_never_overwrites_later_preflight_bindings(

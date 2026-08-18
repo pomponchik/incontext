@@ -98,7 +98,8 @@ class _ExactPreflight:
             return rough_tokens + runtime.settings.fallback_margin_tokens
 
     def _runtime(self) -> Optional[DynamicOutputBudget]:
-        runtime_source = self._owners[-1][1] if self._owners else self.runtime_source
+        owners = self._owners
+        runtime_source = owners[-1][1] if owners else self.runtime_source
         if isinstance(runtime_source, DynamicOutputBudget):
             return runtime_source
         return runtime_source()
