@@ -48,7 +48,11 @@ class _AuxiliaryBudget:
         provider = self._argument(bound.arguments, "provider")
         if runtime.settings.provider and (
             not isinstance(provider, str)
-            or provider.strip().lower() != runtime.settings.provider
+            or provider.strip().lower()
+            not in {
+                runtime.settings.provider,
+                f"main-agent({runtime.settings.provider})",
+            }
         ):
             return original_request
         base_url = self._argument(bound.arguments, "base_url")

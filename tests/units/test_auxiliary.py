@@ -366,6 +366,51 @@ def test_auxiliary_wrapper_ignores_same_model_on_another_route() -> None:
     assert counter.requests == []
 
 
+def test_auxiliary_budgets_synthetic_main_agent_fallback_label() -> None:
+    """Treat Hermes' main-agent fallback label as the configured primary route.
+
+    When an auxiliary provider fails, Hermes' final safety net resolves the
+    real main-model client but calls its builder with the diagnostic label
+    ``main-agent(custom)``.  Its model and base URL still identify the primary
+    deployment exactly; rejecting only the synthetic label loses both exact
+    tokenization and the bounded summary cap that Hermes omitted upstream.
+    """
+
+    counter = Counter(12_345)
+    scoped_runtime = DynamicOutputBudget(
+        Settings(
+            model_name="qwen-test",
+            context_length=65_536,
+            compression_window=64_000,
+            fallback_margin_tokens=1024,
+            provider="custom",
+            base_url="https://primary.invalid/v1",
+        ),
+        counter,
+    )
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        max_tokens: int | None = None,
+        base_url: str | None = None,
+    ) -> dict[str, Any]:
+        del provider, max_tokens, base_url
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(scoped_runtime, build)(
+        "main-agent(custom)",
+        "qwen-test",
+        [{"role": "user", "content": "compression summary"}],
+        max_tokens=2048,
+        base_url="https://primary.invalid/v1",
+    )
+
+    assert result["max_tokens"] == 2048
+    assert len(counter.requests) == 1
+
+
 def test_auxiliary_wrapper_ignores_same_endpoint_on_another_provider() -> None:
     """Use provider identity as well as the normalized endpoint URL.
 
