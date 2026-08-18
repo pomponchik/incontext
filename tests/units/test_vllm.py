@@ -664,6 +664,89 @@ def test_cached_raw_count_supports_distinct_truncation_limits() -> None:
     assert len(opener.calls) == 1
 
 
+def test_count_uses_disaggregated_decode_prompt_token_ids() -> None:
+    """Count the token IDs vLLM uses instead of rendering stale messages.
+
+    On a disaggregated decode node, ``kv_transfer_params.prompt_token_ids``
+    bypass chat-template rendering because the prefill node has already
+    produced the prompt.  Incontext must use that list length, while still
+    calling ``/tokenize`` once to verify the server's advertised context
+    length.  Token-ID changes can then reuse that validation cache safely.
+    """
+
+    backend, opener = make_backend([response(999)])
+    request = {
+        "model": "qwen",
+        "messages": [{"role": "user", "content": "not the decode prompt"}],
+        "truncate_prompt_tokens": -1,
+        "kv_transfer_params": {"prompt_token_ids": [1, 2]},
+        "extra_body": {
+            "kv_transfer_params": {"prompt_token_ids": [0, 4, 8, 15, 16, 23, 42]},
+        },
+    }
+
+    assert backend.count(request, context_length=65_536) == 7
+    request["extra_body"]["kv_transfer_params"]["prompt_token_ids"] = [3, 5, 8]
+    assert backend.count(request, context_length=65_536) == 3
+    assert len(opener.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "token_ids",
+    [None, [], [True], [-1], ["1"]],
+)
+def test_count_rejects_invalid_disaggregated_prompt_token_ids(
+    token_ids: Any,
+) -> None:
+    """Fail open rather than claim exactness for malformed reused prompts.
+
+    vLLM requires a non-empty integer token sequence.  Falling back to message
+    rendering for an invalid but provider-visible sequence could allocate an
+    unrelated output budget, so the backend must surface a contract error and
+    let the middleware use its conservative rough estimator.
+    """
+
+    backend, opener = make_backend()
+
+    with pytest.raises(
+        VllmBackend.VllmBackendError,
+        match="prompt_token_ids",
+    ):
+        backend.count(
+            {
+                "model": "qwen",
+                "messages": [],
+                "kv_transfer_params": {"prompt_token_ids": token_ids},
+            },
+            context_length=65_536,
+        )
+    assert opener.calls == []
+
+
+def test_count_ignores_kv_transfer_metadata_without_reused_prompt_ids() -> None:
+    """Render messages normally when transfer metadata has no prompt IDs.
+
+    ``kv_transfer_params`` carries fields for several transfer phases.  Only a
+    concrete ``prompt_token_ids`` key replaces the chat prompt; unrelated
+    metadata must not disable the ordinary exact tokenizer path.
+    """
+
+    backend, opener = make_backend([response(120)])
+
+    assert (
+        backend.count(
+            {
+                "model": "qwen",
+                "messages": [],
+                "kv_transfer_params": {"do_remote_decode": False},
+            },
+            context_length=65_536,
+        )
+        == 120
+    )
+    assert len(opener.calls) == 1
+
+
 def test_unbounded_prompt_truncation_fails_open_before_tokenization() -> None:
     """Reject vLLM's dynamic ``-1`` sentinel instead of inventing a count.
 

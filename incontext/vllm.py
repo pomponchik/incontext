@@ -99,7 +99,12 @@ class VllmBackend(Backend):
     ) -> int:
         """Return the exact provider-visible prompt token count."""
 
-        truncation_limit = self._prompt_truncation_limit(request)
+        reused_prompt_tokens = self._reused_prompt_token_count(request)
+        truncation_limit = (
+            None
+            if reused_prompt_tokens is not None
+            else self._prompt_truncation_limit(request)
+        )
         encoded = json.dumps(
             self._build_payload(request),
             ensure_ascii=False,
@@ -112,6 +117,8 @@ class VllmBackend(Backend):
             cached = self._cache.get(cache_key)
             if cached is not None:
                 self._cache.move_to_end(cache_key)
+                if reused_prompt_tokens is not None:
+                    return reused_prompt_tokens
                 return (
                     min(cached, truncation_limit)
                     if truncation_limit is not None
@@ -152,6 +159,8 @@ class VllmBackend(Backend):
             self._cache.move_to_end(cache_key)
             while len(self._cache) > self._cache_entries:
                 self._cache.popitem(last=False)
+        if reused_prompt_tokens is not None:
+            return reused_prompt_tokens
         return min(count, truncation_limit) if truncation_limit is not None else count
 
     def clear_cache(self) -> None:
@@ -273,6 +282,35 @@ class VllmBackend(Backend):
             # is the only conservative value available to this client.
             return None
         return value
+
+    @classmethod
+    def _reused_prompt_token_count(cls, request: Dict[str, Any]) -> Optional[int]:
+        """Count vLLM disaggregated-decode prompt IDs when supplied."""
+
+        extra_body = request.get("extra_body")
+        params = (
+            extra_body.get("kv_transfer_params", request.get("kv_transfer_params"))
+            if isinstance(extra_body, dict)
+            else request.get("kv_transfer_params")
+        )
+        if not isinstance(params, dict) or "prompt_token_ids" not in params:
+            return None
+        token_ids = params["prompt_token_ids"]
+        if (
+            not isinstance(token_ids, list)
+            or not token_ids
+            or any(
+                isinstance(token_id, bool)
+                or not isinstance(token_id, int)
+                or token_id < 0
+                for token_id in token_ids
+            )
+        ):
+            raise cls.VllmBackendError(
+                "kv_transfer_params.prompt_token_ids must be a non-empty "
+                "list of non-negative integers",
+            )
+        return len(token_ids)
 
     @staticmethod
     def _has_multimodal_content(request: Dict[str, Any]) -> bool:
