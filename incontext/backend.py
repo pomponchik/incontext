@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, List
+from typing import Any, Dict, List
 
 from pristan import slot
 
@@ -21,7 +21,7 @@ class Backend(ABC):
     @abstractmethod
     def count(
         self,
-        request: dict[str, Any],
+        request: Dict[str, Any],
         *,
         context_length: int,
     ) -> int:
@@ -41,7 +41,7 @@ class Backend(ABC):
     unique=True,
     explicit_plugin_names=True,
 )
-def backends() -> List[Backend]:  # noqa: UP006
+def backends() -> List[Backend]:
     """Provide named inference backends discovered through package metadata."""
 
     return []

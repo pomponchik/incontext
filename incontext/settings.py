@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import inspect
 import math
-from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Type, cast
 
 from skelet import EnvSource, Field, Storage
 
@@ -96,7 +95,7 @@ def _strict_float(
     name: str,
     *,
     minimum_exclusive: float,
-    maximum_inclusive: float | None = None,
+    maximum_inclusive: Optional[float] = None,
 ) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         raise SettingsError(f"{name} must be numeric")
@@ -120,10 +119,10 @@ def _section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     return value
 
 
-def _normalized_model_thresholds(value: Any) -> dict[str, float]:
+def _normalized_model_thresholds(value: Any) -> Dict[str, float]:
     if not isinstance(value, Mapping):
         return {}
-    normalized: dict[str, float] = {}
+    normalized: Dict[str, float] = {}
     for key, threshold in value.items():
         if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
             continue
@@ -137,8 +136,8 @@ def _normalized_model_thresholds(value: Any) -> dict[str, float]:
 
 
 def _construct_compressor(
-    compressor_class: type[Any],
-    candidates: dict[str, Any],
+    compressor_class: Type[Any],
+    candidates: Dict[str, Any],
 ) -> Any:
     parameters = inspect.signature(compressor_class).parameters
     accepts_arbitrary_keywords = any(
@@ -156,7 +155,7 @@ def _construct_compressor(
         raise SettingsError("Hermes ContextCompressor initialization failed") from exc
 
 
-def _load_hermes_components() -> tuple[Callable[[], Any], type[Any]]:
+def _load_hermes_components() -> Tuple[Callable[[], Any], Type[Any]]:
     try:
         # Hermes is intentionally an optional runtime dependency of the package.
         from agent.context_compressor import (  # type: ignore[import-not-found]  # noqa: PLC0415
@@ -225,9 +224,9 @@ def _effective_compression_threshold(
 
 def load_settings(
     *,
-    environment: Environment | None = None,
-    config_loader: Callable[[], Any] | None = None,
-    compressor_class: type[Any] | None = None,
+    environment: Optional[Environment] = None,
+    config_loader: Optional[Callable[[], Any]] = None,
+    compressor_class: Optional[Type[Any]] = None,
 ) -> Settings:
     """Load and validate Hermes plus environment configuration.
 

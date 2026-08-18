@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from typing import Any
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from .backend import Backend
 from .settings import Settings
@@ -18,7 +17,7 @@ def compute_max_tokens(
     prompt_tokens: int,
     *,
     safety_margin: int = 0,
-) -> int | None:
+) -> Optional[int]:
     """Return free output space, or ``None`` when compression is required.
 
     OpenAI-compatible APIs do not accept a zero-token completion.  Returning
@@ -36,7 +35,9 @@ def compute_max_tokens(
     return remaining if remaining > 0 else None
 
 
-def _requested_output_cap(request: dict[str, Any]) -> tuple[str, int] | None:
+def _requested_output_cap(
+    request: Dict[str, Any],
+) -> Optional[Tuple[str, int]]:
     """Return the field and smallest valid cap requested by the caller."""
 
     extra_body = request.get("extra_body")
@@ -54,7 +55,7 @@ def _requested_output_cap(request: dict[str, Any]) -> tuple[str, int] | None:
     return min(caps, key=lambda item: item[1]) if caps else None
 
 
-def estimate_request_tokens_rough(request: dict[str, Any]) -> int:
+def estimate_request_tokens_rough(request: Dict[str, Any]) -> int:
     """Use Hermes' own conservative request estimator as a fallback."""
 
     # Hermes is intentionally an optional runtime dependency of the PyPI package.
@@ -82,7 +83,7 @@ class DynamicOutputBudget:
         settings: Settings,
         backend: Backend,
         *,
-        rough_estimator: Callable[[dict[str, Any]], int] | None = None,
+        rough_estimator: Optional[Callable[[Dict[str, Any]], int]] = None,
     ) -> None:
         self.settings = settings
         self.backend = backend
@@ -95,9 +96,9 @@ class DynamicOutputBudget:
     def __call__(
         self,
         *,
-        request: dict[str, Any],
+        request: Dict[str, Any],
         **context: Any,
-    ) -> dict[str, Any] | None:
+    ) -> Optional[Dict[str, Any]]:
         """Rewrite output-cap aliases into one exact dynamic ``max_tokens``."""
 
         if not isinstance(request, dict) or not isinstance(
@@ -194,8 +195,8 @@ class DynamicOutputBudget:
 
     def _matches_route(
         self,
-        request: dict[str, Any],
-        context: dict[str, Any],
+        request: Dict[str, Any],
+        context: Dict[str, Any],
     ) -> bool:
         extra_body = request.get("extra_body")
         model = (

@@ -31,7 +31,7 @@ class _AuxiliaryBudget:
         self.original = original
         self.signature: Signature = signature(original)
 
-    def __call__(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    def __call__(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
         original_request = self.original(*args, **kwargs)
         runtime = self._runtime()
         if runtime is None:
@@ -69,12 +69,12 @@ class _AuxiliaryBudget:
         result = runtime(request=request)
         return original_request if result is None else result["request"]
 
-    def _runtime(self) -> Optional[DynamicOutputBudget]:  # noqa: UP045
+    def _runtime(self) -> Optional[DynamicOutputBudget]:
         if isinstance(self.runtime_source, DynamicOutputBudget):
             return self.runtime_source
         return self.runtime_source()
 
-    def _argument(self, arguments: dict[str, Any], name: str) -> Any:
+    def _argument(self, arguments: Dict[str, Any], name: str) -> Any:
         if name in arguments:
             return arguments[name]
         for parameter in self.signature.parameters.values():
@@ -86,11 +86,11 @@ class _AuxiliaryBudget:
 
 
 _install_lock = threading.Lock()
-_installed_wrapper: _AuxiliaryBudget | None = None
+_installed_wrapper: Optional[_AuxiliaryBudget] = None
 _install_count = 0
 
 
-def install(runtime: RuntimeSource) -> Cleanup | None:
+def install(runtime: RuntimeSource) -> Optional[Cleanup]:
     """Apply incontext to Hermes requests that bypass ``llm_request`` middleware."""
 
     try:

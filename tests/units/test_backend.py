@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, get_type_hints
 from unittest.mock import patch
 
 import pytest
 from pristan.errors import OneResolutionError
 
 from incontext.backend import Backend, backends
+from incontext.budget import DynamicOutputBudget
+from incontext.hermes import apply_incontext, register
+from incontext.settings import load_settings
 from incontext.vllm import VllmBackend
 
 
@@ -30,6 +33,31 @@ class ReplacementBackend(Backend):
 def test_backend_contract_is_abstract() -> None:
     with pytest.raises(TypeError):
         Backend()  # type: ignore[abstract]
+
+
+def test_public_type_hints_resolve_on_every_supported_python() -> None:
+    """Keep public annotations introspectable down to the Python 3.8 floor.
+
+    Postponed annotations avoid import-time evaluation but do not backport
+    PEP 585 built-in generics or PEP 604 unions.  Plugin frameworks commonly
+    call ``typing.get_type_hints`` on contracts and middleware, so every public
+    callable must resolve at runtime on each interpreter declared in package
+    metadata, not merely parse successfully there.
+    """
+
+    targets = (
+        Backend.count,
+        DynamicOutputBudget.__init__,
+        DynamicOutputBudget.__call__,
+        apply_incontext,
+        register,
+        VllmBackend.__init__,
+        VllmBackend.count,
+        load_settings,
+    )
+
+    for target in targets:
+        assert get_type_hints(target)
 
 
 def test_bundled_vllm_provider_is_selected_by_name() -> None:

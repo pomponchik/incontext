@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from .auxiliary import install as install_auxiliary_budget
 from .backend import backends
@@ -13,8 +13,8 @@ from .preflight import install as install_exact_preflight
 from .settings import Environment, load_settings
 
 LOGGER = logging.getLogger(__name__)
-_runtimes: dict[str, DynamicOutputBudget] = {}
-_active_profiles: dict[str, int] = {}
+_runtimes: Dict[str, DynamicOutputBudget] = {}
+_active_profiles: Dict[str, int] = {}
 _runtime_lock = threading.Lock()
 
 
@@ -39,7 +39,7 @@ def get_runtime() -> DynamicOutputBudget:
         return runtime
 
 
-def get_active_runtime() -> Optional[DynamicOutputBudget]:  # noqa: UP045
+def get_active_runtime() -> Optional[DynamicOutputBudget]:
     """Return a runtime only where an active profile loaded the plugin."""
 
     key = _runtime_key()
@@ -89,9 +89,9 @@ def _runtime_key() -> str:
 
 def apply_incontext(
     *,
-    request: dict[str, Any],
+    request: Dict[str, Any],
     **context: Any,
-) -> dict[str, Any] | None:
+) -> Optional[Dict[str, Any]]:
     """Stable function entry point used by Hermes middleware."""
 
     return get_runtime()(request=request, **context)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 from importlib import import_module
-from typing import Any, Callable, Optional, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 from .budget import DynamicOutputBudget
 
@@ -51,7 +51,7 @@ class _ExactPreflight:
                 0,
                 {"role": "system", "content": system_prompt},
             )
-        request: dict[str, Any] = {
+        request: Dict[str, Any] = {
             "model": runtime.settings.model_name,
             "messages": provider_messages,
         }
@@ -80,19 +80,19 @@ class _ExactPreflight:
             )
             return rough_tokens + runtime.settings.fallback_margin_tokens
 
-    def _runtime(self) -> Optional[DynamicOutputBudget]:  # noqa: UP045
+    def _runtime(self) -> Optional[DynamicOutputBudget]:
         if isinstance(self.runtime_source, DynamicOutputBudget):
             return self.runtime_source
         return self.runtime_source()
 
 
 _install_lock = threading.Lock()
-_installed_wrappers: tuple[_ExactPreflight, ...] = ()
-_installed_modules: tuple[Any, ...] = ()
+_installed_wrappers: Tuple[_ExactPreflight, ...] = ()
+_installed_modules: Tuple[Any, ...] = ()
 _install_count = 0
 
 
-def _owns_bindings(modules: tuple[Any, ...]) -> bool:
+def _owns_bindings(modules: Tuple[Any, ...]) -> bool:
     return (
         _installed_modules == modules
         and bool(_installed_wrappers)
@@ -104,10 +104,10 @@ def _owns_bindings(modules: tuple[Any, ...]) -> bool:
 
 
 def _replace_bindings(
-    modules: tuple[Any, ...],
+    modules: Tuple[Any, ...],
     runtime: RuntimeSource,
-) -> tuple[_ExactPreflight, ...]:
-    created: list[_ExactPreflight] = []
+) -> Tuple[_ExactPreflight, ...]:
+    created: List[_ExactPreflight] = []
     for module in modules:
         current = module.__dict__["estimate_request_tokens_rough"]
         original = (
@@ -121,7 +121,7 @@ def _replace_bindings(
     return tuple(created)
 
 
-def install(runtime: RuntimeSource) -> Cleanup | None:
+def install(runtime: RuntimeSource) -> Optional[Cleanup]:
     """Make Hermes compress from the selected backend's exact token count.
 
     Hermes normally decides whether to compress just before it creates the

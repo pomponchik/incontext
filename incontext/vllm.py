@@ -8,8 +8,7 @@ import math
 import threading
 import urllib.request
 from collections import OrderedDict
-from collections.abc import Callable
-from typing import Any, cast
+from typing import Any, Callable, Dict, Optional, cast
 from urllib.parse import urlsplit
 
 from skelet import EnvSource, Field, Storage
@@ -67,8 +66,8 @@ class VllmBackend(Backend):
         self,
         *,
         cache_entries: int = 64,
-        opener: Callable[..., Any] | None = None,
-        environment: VllmEnvironment | None = None,
+        opener: Optional[Callable[..., Any]] = None,
+        environment: Optional[VllmEnvironment] = None,
     ) -> None:
         if isinstance(cache_entries, bool) or not isinstance(cache_entries, int):
             raise TypeError("cache_entries must be a positive integer")
@@ -94,7 +93,7 @@ class VllmBackend(Backend):
 
     def count(
         self,
-        request: dict[str, Any],
+        request: Dict[str, Any],
         *,
         context_length: int,
     ) -> int:
@@ -162,10 +161,12 @@ class VllmBackend(Backend):
             self._cache.clear()
 
     @staticmethod
-    def _build_payload(request: dict[str, Any]) -> dict[str, Any]:
+    def _build_payload(
+        request: Dict[str, Any],
+    ) -> Dict[str, Any]:
         extra_body = request.get("extra_body")
         extra_body = extra_body if isinstance(extra_body, dict) else {}
-        payload: dict[str, Any] = {
+        payload: Dict[str, Any] = {
             "model": extra_body.get("model", request.get("model")),
             "messages": extra_body.get("messages", request.get("messages")),
         }
@@ -212,7 +213,7 @@ class VllmBackend(Backend):
     @classmethod
     def _positive_response_integer(
         cls,
-        response: dict[str, Any],
+        response: Dict[str, Any],
         key: str,
     ) -> int:
         value = response.get(key)
@@ -223,7 +224,10 @@ class VllmBackend(Backend):
         return value
 
     @classmethod
-    def _prompt_truncation_limit(cls, request: dict[str, Any]) -> int | None:
+    def _prompt_truncation_limit(
+        cls,
+        request: Dict[str, Any],
+    ) -> Optional[int]:
         """Resolve vLLM's positive prompt truncation from the wire request."""
 
         extra_body = request.get("extra_body")

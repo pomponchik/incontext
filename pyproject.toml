@@ -106,7 +106,13 @@ select = [
     "UP",
     "W",
 ]
-ignore = ["TRY003"]
+ignore = [
+    "TRY003",
+    # Runtime-resolvable annotations are part of the Python 3.8 public API.
+    "UP006",
+    "UP007",
+    "UP045",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["ARG", "PLR0913", "PLR2004", "S101"]
