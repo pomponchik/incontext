@@ -308,16 +308,19 @@ class VllmBackend(Backend):
 
     @staticmethod
     def _coerce_non_strict_integer(value: Any) -> Optional[int]:
-        """Mirror the safe subset of vLLM's non-strict integer coercion."""
+        """Mirror vLLM's Pydantic integer coercion without adding a dependency."""
 
         if isinstance(value, bool):
             return int(value)
         if isinstance(value, int):
             return value
-        if (
-            isinstance(value, float) and math.isfinite(value) and value.is_integer()
-        ) or (isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip())):
+        if isinstance(value, float) and math.isfinite(value) and value.is_integer():
             return int(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if re.fullmatch(r"[+-]?[0-9]+(?:_[0-9]+)*(?:\.0+)?", text):
+                integer = text.split(".", 1)[0].replace("_", "")
+                return int(integer)
         return None
 
     @classmethod

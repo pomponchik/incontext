@@ -88,7 +88,16 @@ def test_vllm_maps_responses_output_cap_to_chat_completions() -> None:
 
 @pytest.mark.parametrize(
     ("wire_value", "expected"),
-    [("5", 5), (5.0, 5), (True, 1), (0, None), (1.5, None)],
+    [
+        ("5", 5),
+        ("5.0", 5),
+        ("1_0", 10),
+        ("\u0661", None),
+        (5.0, 5),
+        (True, 1),
+        (0, None),
+        (1.5, None),
+    ],
 )
 def test_vllm_coerces_output_caps_like_chat_request_validation(
     wire_value: Any,
@@ -96,10 +105,10 @@ def test_vllm_coerces_output_caps_like_chat_request_validation(
 ) -> None:
     """Expose only positive caps that vLLM's request model will enforce.
 
-    Its Pydantic schema accepts integer strings, integral floats, and booleans
-    before validating positivity.  Dynamic budgeting must preserve those
-    caller bounds, while fractional and non-positive values remain invalid and
-    cannot influence the emitted provider request.
+    Its Pydantic schema accepts zero-fraction decimal strings, ASCII underscore
+    separators, integral floats, and booleans, while rejecting Unicode digit
+    spellings.  Dynamic budgeting must preserve exactly those caller bounds;
+    accepting or dropping a different spelling changes the provider request.
     """
 
     backend, _ = make_backend()
@@ -649,7 +658,7 @@ def test_count_honors_extra_body_prompt_truncation_override() -> None:
 
 @pytest.mark.parametrize(
     ("wire_value", "expected"),
-    [(True, 1), ("2", 2), (3.0, 3)],
+    [(True, 1), ("2", 2), ("50.0", 50), ("1_0", 10), (3.0, 3)],
 )
 def test_count_honors_prompt_truncation_values_coerced_by_vllm(
     wire_value: Any,
@@ -657,10 +666,10 @@ def test_count_honors_prompt_truncation_values_coerced_by_vllm(
 ) -> None:
     """Match vLLM ChatCompletionRequest's non-strict integer validation.
 
-    vLLM coerces JSON booleans, integer strings, and integral floats before
-    applying prompt truncation.  Because ``/tokenize`` returns the untruncated
-    rendering, ignoring an accepted wire value counts tokens generation drops
-    and can trigger premature compression or reduce the available completion.
+    vLLM coerces JSON booleans, integer and zero-fraction decimal strings, and
+    integral floats before applying prompt truncation.  Because ``/tokenize``
+    returns the untruncated rendering, ignoring an accepted wire value counts
+    tokens generation drops and can trigger premature compression.
     """
 
     backend, _ = make_backend([response(120)])
@@ -678,7 +687,10 @@ def test_count_honors_prompt_truncation_values_coerced_by_vllm(
     )
 
 
-@pytest.mark.parametrize("wire_value", [1.5, float("nan"), "invalid", object()])
+@pytest.mark.parametrize(
+    "wire_value",
+    [1.5, float("nan"), "invalid", "\u0661", object()],
+)
 def test_count_does_not_invent_invalid_prompt_truncation_coercions(
     wire_value: Any,
 ) -> None:
