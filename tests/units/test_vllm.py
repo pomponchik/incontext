@@ -239,6 +239,61 @@ def test_backend_sends_exact_request_and_caches_result() -> None:
     assert json.loads(http_request.data or b"") == VllmBackend._build_payload(request)
 
 
+def test_backend_preserves_prompt_observable_json_key_order() -> None:
+    """Keep schema insertion order identical to the inference request.
+
+    Chat templates can iterate JSON-schema mappings in insertion order, so
+    recursively sorting keys before ``/tokenize`` may render a different prompt
+    from the one vLLM receives for generation.  Requests with different schema
+    order must also occupy different cache entries instead of sharing a count.
+    """
+
+    backend, opener = make_backend([response(10), response(11)])
+    first_properties = {
+        "z_first": {"type": "string"},
+        "a_second": {"type": "string"},
+    }
+    second_properties = {
+        "a_second": {"type": "string"},
+        "z_first": {"type": "string"},
+    }
+
+    def request(properties: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "use the tool"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ordered",
+                        "parameters": {
+                            "type": "object",
+                            "properties": properties,
+                        },
+                    },
+                },
+            ],
+        }
+
+    first_request = request(first_properties)
+    second_request = request(second_properties)
+    assert backend.count(first_request, context_length=65_536) == 10
+    assert backend.count(second_request, context_length=65_536) == 11
+
+    assert len(opener.calls) == 2
+    first_wire = opener.calls[0][0].data
+    assert (
+        first_wire
+        == json.dumps(
+            VllmBackend._build_payload(first_request),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    )
+    assert first_wire.index(b'"z_first"') < first_wire.index(b'"a_second"')
+
+
 def test_cache_does_not_bypass_context_length_validation() -> None:
     backend, opener = make_backend([response(1), response(1)])
     request = {"model": "qwen", "messages": []}

@@ -104,7 +104,6 @@ class VllmBackend(Backend):
             self._build_payload(request),
             ensure_ascii=False,
             separators=(",", ":"),
-            sort_keys=True,
         ).encode()
         cache_key = hashlib.sha256(
             encoded + b":" + str(context_length).encode("ascii"),
