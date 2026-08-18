@@ -267,13 +267,61 @@ def test_runtime_key_preserves_unresolvable_home_value(
 
 def test_apply_incontext_delegates_context() -> None:
     runtime = mock.Mock(return_value={"request": {"max_tokens": 1}})
-    with mock.patch.object(hermes, "get_runtime", return_value=runtime):
+    with mock.patch.object(hermes, "get_active_runtime", return_value=runtime):
         result = hermes.apply_incontext(
             request={"messages": []},
             session_id="session",
         )
     assert result == {"request": {"max_tokens": 1}}
     runtime.assert_called_once_with(request={"messages": []}, session_id="session")
+
+
+def test_stale_middleware_during_unload_does_not_resurrect_runtime(
+    runtime_settings: Settings,
+) -> None:
+    """Do not recreate a profile runtime from middleware already in flight.
+
+    Hermes disposes its reverse ownership ledger while requests may already
+    hold a reference to the registered callback.  After the final profile
+    cleanup such a late callback must fail open without building or caching a
+    runtime; otherwise force rediscovery reuses settings constructed during
+    unload rather than loading the profile's new configuration.
+    """
+
+    first = mock.Mock()
+    first.settings = runtime_settings
+    fresh = mock.Mock()
+    fresh.settings = runtime_settings
+    first_context = Context()
+    second_context = Context()
+    with mock.patch.object(
+        hermes,
+        "_runtime_key",
+        return_value="profile-a",
+    ), mock.patch.object(
+        hermes,
+        "build_runtime",
+        side_effect=[first, fresh],
+    ) as builder, mock.patch.object(
+        hermes,
+        "install_exact_preflight",
+        return_value=None,
+    ), mock.patch.object(
+        hermes,
+        "install_auxiliary_budget",
+        return_value=None,
+    ):
+        hermes.register(first_context)
+        stale_callback = first_context.calls[0][1]
+        first_context.unload_callbacks[-1]()
+
+        assert stale_callback(request={"model": "qwen", "messages": []}) is None
+        assert hermes._runtimes == {}
+
+        hermes.register(second_context)
+
+    assert builder.call_count == 2
+    assert hermes._runtimes == {"profile-a": fresh}
 
 
 def test_register_validates_and_registers_middleware(

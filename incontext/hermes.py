@@ -107,7 +107,10 @@ def apply_incontext(
 ) -> Optional[Dict[str, Any]]:
     """Stable function entry point used by Hermes middleware."""
 
-    return get_runtime()(request=request, **context)
+    runtime = get_active_runtime()
+    if runtime is None:
+        return None
+    return runtime(request=request, **context)
 
 
 def register(ctx: Any) -> None:
