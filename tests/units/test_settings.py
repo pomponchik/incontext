@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import sys
 import types
 from collections.abc import Mapping
 from typing import Any, ClassVar
@@ -312,6 +313,115 @@ def test_load_settings_uses_hermes_model_specific_threshold(
     assert calls == [
         (0.5, "qwen-test", "custom", base_config["compression"]),
     ]
+
+
+def test_effective_threshold_delegates_to_installed_hermes_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reuse Hermes helpers including opt-out and route classification inputs.
+
+    The policy is version-sensitive and contains distinct Codex/Spark branches.
+    This test supplies the installed-module contract and verifies incontext
+    forwards model, provider, opt-out state, and the final autoraise verdict
+    rather than reimplementing those rules.
+    """
+
+    agent = types.ModuleType("agent")
+    agent.__path__ = []  # type: ignore[attr-defined]
+    agent_init = types.ModuleType("agent.agent_init")
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+    calls: list[tuple[Any, ...]] = []
+
+    def model_threshold(
+        model: str,
+        provider: str,
+        *,
+        allow_codex_gpt55_autoraise: bool,
+    ) -> float:
+        calls.append(("threshold", model, provider, allow_codex_gpt55_autoraise))
+        return 0.7
+
+    def resolve(
+        configured: float,
+        override: float,
+        *,
+        model: str,
+        is_codex_autoraise: bool,
+    ) -> tuple[float, None]:
+        calls.append(("resolve", configured, override, model, is_codex_autoraise))
+        return override, None
+
+    agent_init._resolve_compression_threshold = resolve  # type: ignore[attr-defined]
+    auxiliary._compression_threshold_for_model = model_threshold  # type: ignore[attr-defined]
+    auxiliary._is_codex_gpt54_or_gpt55 = (  # type: ignore[attr-defined]
+        lambda model, provider: False
+    )
+    auxiliary._is_codex_spark = lambda model, provider: True  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.agent_init", agent_init)
+    monkeypatch.setitem(
+        sys.modules,
+        "agent.auxiliary_client",
+        auxiliary,
+    )
+
+    result = settings._effective_compression_threshold(
+        0.5,
+        model="spark",
+        provider="openai-codex",
+        compression={"codex_gpt55_autoraise": False},
+    )
+
+    assert result == 0.7
+    assert calls == [
+        ("threshold", "spark", "openai-codex", False),
+        ("resolve", 0.5, 0.7, "spark", True),
+    ]
+
+
+def test_effective_threshold_falls_back_when_hermes_policy_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Match Hermes' best-effort behavior for private policy failures.
+
+    These helpers are intentionally reused from the installed Hermes version.
+    If a future compatible release raises while resolving optional model policy,
+    incontext must retain the validated global threshold just as Hermes does.
+    """
+
+    agent = types.ModuleType("agent")
+    agent.__path__ = []  # type: ignore[attr-defined]
+    agent_init = types.ModuleType("agent.agent_init")
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+
+    def broken_policy(*args: Any, **kwargs: Any) -> float:
+        raise RuntimeError("policy unavailable")
+
+    agent_init._resolve_compression_threshold = (  # type: ignore[attr-defined]
+        lambda *args, **kwargs: (0.9, None)
+    )
+    auxiliary._compression_threshold_for_model = broken_policy  # type: ignore[attr-defined]
+    auxiliary._is_codex_gpt54_or_gpt55 = (  # type: ignore[attr-defined]
+        lambda model, provider: False
+    )
+    auxiliary._is_codex_spark = lambda model, provider: False  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.agent_init", agent_init)
+    monkeypatch.setitem(
+        sys.modules,
+        "agent.auxiliary_client",
+        auxiliary,
+    )
+
+    assert (
+        settings._effective_compression_threshold(
+            0.6,
+            model="qwen",
+            provider="custom",
+            compression={},
+        )
+        == 0.6
+    )
 
 
 def test_load_settings_reserves_hermes_configured_output_budget() -> None:
