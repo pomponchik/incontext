@@ -970,33 +970,32 @@ def test_count_ignores_kv_transfer_metadata_without_reused_prompt_ids() -> None:
 
 
 @pytest.mark.parametrize("wire_value", [-1, "-1"])
-def test_unbounded_prompt_truncation_fails_open_before_tokenization(
+def test_count_uses_raw_count_for_dynamic_minus_one_prompt_truncation(
     wire_value: Any,
 ) -> None:
-    """Reject vLLM's dynamic ``-1`` sentinel instead of inventing a count.
+    """Keep exact counting for vLLM's dynamic ``-1`` truncation sentinel.
 
-    For chat generation ``-1`` maps to the model input allowance after the
-    requested output budget is reserved.  Incontext is itself calculating that
-    budget, so treating the sentinel as a fixed positive cap would be circular
-    and potentially unsafe; raising delegates to the middleware's conservative
-    rough fallback without transmitting the prompt to an inexact endpoint.
+    Incontext emits output ``O <= W - P`` and validates compression window
+    ``W <= C``.  vLLM therefore resolves ``-1`` to an input limit
+    ``C - O >= C - W + P >= P``: a request below the boundary cannot truncate
+    its raw P-token prompt.  Skipping ``/tokenize`` would unnecessarily replace
+    this exact count with a margin-adjusted rough estimate.
     """
 
-    backend, opener = make_backend()
+    backend, opener = make_backend([response(60, 100)])
 
-    with pytest.raises(
-        VllmBackend.VllmBackendError,
-        match="depends on the provider output budget",
-    ):
+    assert (
         backend.count(
             {
                 "model": "qwen",
                 "messages": [],
                 "truncate_prompt_tokens": wire_value,
             },
-            context_length=65_536,
+            context_length=100,
         )
-    assert opener.calls == []
+        == 60
+    )
+    assert len(opener.calls) == 1
 
 
 def test_default_opener_is_resolved_at_construction(

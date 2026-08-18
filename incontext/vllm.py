@@ -293,9 +293,7 @@ class VllmBackend(Backend):
         )
         coerced = cls._coerce_non_strict_integer(value)
         if coerced == -1:
-            raise cls.VllmBackendError(
-                "truncate_prompt_tokens=-1 depends on the provider output budget",
-            )
+            return None
         if coerced is None or coerced <= 0:
             return None
         if cls._has_multimodal_content(request):
