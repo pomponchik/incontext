@@ -126,6 +126,49 @@ def test_estimate_request_tokens_rough_handles_invalid_result(
     assert budget.estimate_request_tokens_rough(request) == 1
 
 
+def test_rough_fallback_counts_extra_body_prompt_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Count the provider-visible prompt when exact tokenization fails.
+
+    OpenAI clients shallow-merge ``extra_body`` over generated request fields,
+    and the exact backend mirrors that rule for messages and tools.  Hermes'
+    rough estimator must receive the same effective values during a tokenizer
+    outage; budgeting from superseded top-level content can otherwise allocate
+    output beyond the compression boundary by an unbounded amount.
+    """
+
+    top_messages = [{"role": "user", "content": "superseded"}]
+    wire_messages = [{"role": "user", "content": f"wire-{index}"} for index in range(7)]
+    wire_tools = [{"type": "function", "function": {"name": "wire"}}]
+    agent_package = types.ModuleType("agent")
+    agent_package.__path__ = []  # type: ignore[attr-defined]
+    metadata_module = types.ModuleType("agent.model_metadata")
+
+    def estimator(messages: Any, *, tools: Any) -> int:
+        assert messages is wire_messages
+        assert tools is wire_tools
+        return 700
+
+    metadata_module.estimate_request_tokens_rough = estimator  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent_package)
+    monkeypatch.setitem(sys.modules, "agent.model_metadata", metadata_module)
+
+    assert (
+        budget.estimate_request_tokens_rough(
+            {
+                "messages": top_messages,
+                "tools": [{"type": "function"}],
+                "extra_body": {
+                    "messages": wire_messages,
+                    "tools": wire_tools,
+                },
+            },
+        )
+        == 700
+    )
+
+
 def test_runtime_keeps_injected_backend_and_default_estimator(
     runtime_settings: Settings,
 ) -> None:

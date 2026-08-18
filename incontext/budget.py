@@ -74,10 +74,18 @@ def estimate_request_tokens_rough(request: Dict[str, Any]) -> int:
         estimate_request_tokens_rough as estimator,
     )
 
-    estimate = estimator(
-        request.get("messages") or [],
-        tools=request.get("tools") or None,
+    extra_body = request.get("extra_body")
+    messages = (
+        extra_body.get("messages", request.get("messages"))
+        if isinstance(extra_body, dict)
+        else request.get("messages")
     )
+    tools = (
+        extra_body.get("tools", request.get("tools"))
+        if isinstance(extra_body, dict)
+        else request.get("tools")
+    )
+    estimate = estimator(messages or [], tools=tools or None)
     if isinstance(estimate, bool):
         return 1
     try:
