@@ -340,6 +340,48 @@ def test_auxiliary_wrapper_ignores_same_endpoint_on_another_provider() -> None:
     assert counter.requests == []
 
 
+def test_auxiliary_accepts_canonical_equivalent_route() -> None:
+    """Match the configured endpoint after HTTP-client canonicalization.
+
+    Hermes passes its auxiliary client's rendered URL and normalized provider.
+    Lowercasing DNS hosts, removing the default HTTPS port, or appending a slash
+    does not change route identity, so those transformations must not silently
+    bypass exact budgeting for the configured primary endpoint.
+    """
+
+    counter = Counter(12_345)
+    scoped_runtime = DynamicOutputBudget(
+        Settings(
+            model_name="qwen-test",
+            context_length=65_536,
+            compression_window=64_000,
+            fallback_margin_tokens=1024,
+            provider="custom",
+            base_url="https://primary.invalid/v1",
+        ),
+        counter,
+    )
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        base_url: str | None = None,
+    ) -> dict[str, Any]:
+        del provider, base_url
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(scoped_runtime, build)(
+        " Custom ",
+        "qwen-test",
+        [{"role": "user", "content": "primary"}],
+        base_url="https://PRIMARY.INVALID:443/v1/",
+    )
+
+    assert result["max_tokens"] == 64_000 - 12_345
+    assert len(counter.requests) == 1
+
+
 def test_auxiliary_runtime_resolver_tracks_the_active_profile() -> None:
     """Resolve the profile-scoped runtime at call time, not installation time.
 

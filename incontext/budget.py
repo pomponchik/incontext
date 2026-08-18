@@ -6,7 +6,7 @@ import logging
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from .backend import Backend
-from .settings import Settings
+from .settings import Settings, normalize_base_url
 
 LOGGER = logging.getLogger(__name__)
 OUTPUT_BUDGET_FIELDS = ("max_tokens", "max_completion_tokens", "max_output_tokens")
@@ -229,12 +229,12 @@ class DynamicOutputBudget:
         if (
             self.settings.provider
             and isinstance(provider, str)
-            and provider.strip() != self.settings.provider
+            and provider.strip().lower() != self.settings.provider
         ):
             return False
         base_url = context.get("base_url")
         return not (
             self.settings.base_url
             and isinstance(base_url, str)
-            and base_url.strip().rstrip("/") != self.settings.base_url
+            and normalize_base_url(base_url) != self.settings.base_url
         )

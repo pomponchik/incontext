@@ -9,6 +9,7 @@ from inspect import Parameter, Signature, signature
 from typing import Any, Callable, Dict, Optional, Union, cast
 
 from .budget import DynamicOutputBudget
+from .settings import normalize_base_url
 
 LOGGER = logging.getLogger(__name__)
 AuxiliaryBuilder = Callable[..., Dict[str, Any]]
@@ -42,12 +43,15 @@ class _AuxiliaryBudget:
         if model != runtime.settings.model_name:
             return original_request
         provider = self._argument(bound.arguments, "provider")
-        if runtime.settings.provider and provider != runtime.settings.provider:
+        if runtime.settings.provider and (
+            not isinstance(provider, str)
+            or provider.strip().lower() != runtime.settings.provider
+        ):
             return original_request
         base_url = self._argument(bound.arguments, "base_url")
         if runtime.settings.base_url and (
             not isinstance(base_url, str)
-            or base_url.strip().rstrip("/") != runtime.settings.base_url
+            or normalize_base_url(base_url) != runtime.settings.base_url
         ):
             return original_request
         max_tokens = self._argument(bound.arguments, "max_tokens")

@@ -252,6 +252,57 @@ def test_load_settings_uses_real_compressor_threshold() -> None:
     assert call["max_tokens"] is None
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, ""),
+        (" relative/path/ ", "relative/path"),
+        ("https://EXAMPLE.test:443/v1/", "https://example.test/v1"),
+        ("http://EXAMPLE.test:8080/v1/", "http://example.test:8080/v1"),
+        ("http://[::1]:80/v1/", "http://[::1]/v1"),
+        ("https://user:pass@example.test/v1", "https://user:pass@example.test/v1"),
+        ("https://example.test:notaport/v1", "https://example.test:notaport/v1"),
+    ],
+)
+def test_base_url_normalization_preserves_route_identity(
+    value: Any,
+    expected: str,
+) -> None:
+    """Canonicalize only URL spellings that preserve endpoint identity.
+
+    Hermes and its HTTP clients may lowercase hosts, remove default ports, or
+    append a trailing slash.  Those representations must compare equal, while
+    relative, credential-bearing, and malformed authorities stay untouched so
+    normalization never invents a different route.
+    """
+
+    assert settings.normalize_base_url(value) == expected
+
+
+def test_load_settings_normalizes_provider_like_hermes() -> None:
+    """Store the canonical provider and endpoint exposed by live Hermes.
+
+    Hermes strips and lowercases provider IDs before middleware dispatch, and
+    its HTTP client canonicalizes base URLs.  Applying the same normalization
+    while constructing Settings prevents mixed-case configuration from making
+    the primary route look like an unrelated fallback.
+    """
+
+    config = {
+        **base_config,
+        "model": {
+            **base_config["model"],
+            "provider": " Custom ",
+            "base_url": "https://INFERENCE.EXAMPLE:443/v1/",
+        },
+    }
+
+    result = load(config=config)
+
+    assert result.provider == "custom"
+    assert result.base_url == "https://inference.example/v1"
+
+
 def test_load_settings_passes_modern_compression_options() -> None:
     ModernCompressor.calls.clear()
     config = {

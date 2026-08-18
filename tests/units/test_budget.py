@@ -551,6 +551,39 @@ def test_runtime_ignores_same_model_on_a_different_provider_route() -> None:
     assert counter.requests == []
 
 
+def test_runtime_accepts_canonical_equivalent_route() -> None:
+    """Budget the primary route after harmless context normalization.
+
+    Middleware context can contain the HTTP client's canonical spelling rather
+    than the literal config value.  Provider case, host case, a default HTTPS
+    port, and a trailing slash must compare as one route so exact budgeting is
+    not accidentally disabled for the configured endpoint.
+    """
+
+    counter = Counter(100)
+    runtime = budget.DynamicOutputBudget(
+        Settings(
+            model_name="shared-model",
+            context_length=1000,
+            compression_window=800,
+            fallback_margin_tokens=10,
+            provider="custom",
+            base_url="https://primary.invalid/v1",
+        ),
+        counter,
+    )
+
+    result = runtime(
+        request={"model": "shared-model", "messages": []},
+        provider=" Custom ",
+        base_url="https://PRIMARY.INVALID:443/v1/",
+    )
+
+    assert result is not None
+    assert result["request"]["max_tokens"] == 700
+    assert len(counter.requests) == 1
+
+
 @given(
     small=st.integers(min_value=1, max_value=40_000),
     growth=st.integers(min_value=1, max_value=40_000),

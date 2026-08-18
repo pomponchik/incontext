@@ -6,6 +6,7 @@ import inspect
 import math
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Type, cast
+from urllib.parse import urlsplit, urlunsplit
 
 from skelet import EnvSource, Field, Storage
 
@@ -70,6 +71,33 @@ class Settings:
     fallback_margin_tokens: int
     provider: str
     base_url: str
+
+
+def normalize_base_url(value: Any) -> str:
+    """Return a stable route identity for equivalent HTTP endpoint spellings."""
+
+    text = str(value or "").strip().rstrip("/")
+    if not text:
+        return ""
+    try:
+        parsed = urlsplit(text)
+        port = parsed.port
+    except ValueError:
+        return text
+    if not parsed.scheme or parsed.hostname is None:
+        return text
+    if parsed.username is not None or parsed.password is not None:
+        return text
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = {"http": 80, "https": 443}.get(scheme)
+    if port is not None and port != default_port:
+        host = f"{host}:{port}"
+    return urlunsplit(
+        (scheme, host, parsed.path.rstrip("/"), parsed.query, parsed.fragment),
+    )
 
 
 def _strict_int(
@@ -267,8 +295,8 @@ def load_settings(
         "Hermes model.context_length",
         minimum=1,
     )
-    provider = str(model.get("provider") or "").strip()
-    base_url = str(model.get("base_url") or "").strip().rstrip("/")
+    provider = str(model.get("provider") or "").strip().lower()
+    base_url = normalize_base_url(model.get("base_url"))
     configured_max_tokens = model.get("max_tokens")
     max_tokens = (
         None
@@ -305,9 +333,9 @@ def load_settings(
                 "model": model_name.strip(),
                 "threshold_percent": threshold,
                 "quiet_mode": True,
-                "base_url": str(model.get("base_url") or ""),
+                "base_url": base_url,
                 "config_context_length": context_length,
-                "provider": str(model.get("provider") or ""),
+                "provider": provider,
                 "api_mode": str(model.get("api_mode") or ""),
                 "max_tokens": max_tokens,
                 "model_thresholds": _normalized_model_thresholds(
