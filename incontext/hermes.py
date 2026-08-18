@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .auxiliary import install as install_auxiliary_budget
 from .backend import backends
@@ -16,6 +16,8 @@ LOGGER = logging.getLogger(__name__)
 _runtimes: Dict[str, DynamicOutputBudget] = {}
 _active_profiles: Dict[str, int] = {}
 _runtime_lock = threading.Lock()
+_registration_lock = threading.Lock()
+_legacy_cleanups: Dict[str, Tuple[Callable[[], None], ...]] = {}
 
 
 def build_runtime() -> DynamicOutputBudget:
@@ -112,26 +114,42 @@ def register(ctx: Any) -> None:
     """Register the plugin with a Hermes ``PluginContext``."""
 
     key = _runtime_key()
-    runtime = get_runtime()
-    profile_cleanup = _activate_profile(key)
-    cleanups: List[Callable[[], None]] = [profile_cleanup]
-    try:
-        preflight_cleanup = install_exact_preflight(get_active_runtime)
-        if preflight_cleanup is not None:
-            cleanups.append(preflight_cleanup)
-        auxiliary_cleanup = install_auxiliary_budget(get_active_runtime)
-        if auxiliary_cleanup is not None:
-            cleanups.append(auxiliary_cleanup)
-        ctx.register_middleware("llm_request", apply_incontext)
-        on_unload = getattr(ctx, "on_unload", None)
-        if callable(on_unload):
-            for cleanup in cleanups[1:]:
-                on_unload(cleanup)
-            on_unload(profile_cleanup)
-    except Exception:
-        for cleanup in reversed(cleanups):
-            cleanup()
-        raise
+    on_unload = getattr(ctx, "on_unload", None)
+    with _registration_lock:
+        if not callable(on_unload) and key in _legacy_cleanups:
+            cleanups = _legacy_cleanups[key]
+            try:
+                runtime = build_runtime()
+                ctx.register_middleware("llm_request", apply_incontext)
+            except Exception:
+                for cleanup in reversed(cleanups):
+                    cleanup()
+                _legacy_cleanups.pop(key, None)
+                raise
+            with _runtime_lock:
+                _runtimes[key] = runtime
+        else:
+            runtime = get_runtime()
+            profile_cleanup = _activate_profile(key)
+            acquired: List[Callable[[], None]] = [profile_cleanup]
+            try:
+                preflight_cleanup = install_exact_preflight(get_active_runtime)
+                if preflight_cleanup is not None:
+                    acquired.append(preflight_cleanup)
+                auxiliary_cleanup = install_auxiliary_budget(get_active_runtime)
+                if auxiliary_cleanup is not None:
+                    acquired.append(auxiliary_cleanup)
+                ctx.register_middleware("llm_request", apply_incontext)
+                if callable(on_unload):
+                    for cleanup in acquired[1:]:
+                        on_unload(cleanup)
+                    on_unload(profile_cleanup)
+                else:
+                    _legacy_cleanups[key] = tuple(acquired)
+            except Exception:
+                for cleanup in reversed(acquired):
+                    cleanup()
+                raise
     LOGGER.info(
         "incontext registered context=%d compression_window=%d",
         runtime.settings.context_length,
@@ -140,6 +158,7 @@ def register(ctx: Any) -> None:
 
 
 def _reset_runtime_for_tests() -> None:
+    _legacy_cleanups.clear()
     with _runtime_lock:
         _runtimes.clear()
         _active_profiles.clear()

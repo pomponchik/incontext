@@ -342,6 +342,118 @@ def test_register_tolerates_legacy_context_without_unload_hook(
     assert context.calls == [("llm_request", hermes.apply_incontext)]
 
 
+def test_legacy_force_reload_replaces_runtime_without_adding_owners(
+    runtime_settings: Settings,
+) -> None:
+    """Refresh configuration safely on Hermes versions without unload hooks.
+
+    Hermes 2026.7 force discovery invokes the entry point again but cannot run
+    cleanup callbacks.  A repeat registration for the same profile must build
+    and swap a fresh runtime while retaining exactly one profile owner and one
+    pair of global wrappers; otherwise every reload leaks refcounts and keeps
+    using the original context-window settings forever.
+    """
+
+    class LegacyContext:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, Any]] = []
+
+        def register_middleware(self, kind: str, callback: Any) -> None:
+            self.calls.append((kind, callback))
+
+    first = mock.Mock()
+    first.settings = runtime_settings
+    second = mock.Mock()
+    second.settings = runtime_settings
+    first_context = LegacyContext()
+    second_context = LegacyContext()
+    preflight_cleanup = mock.Mock()
+    auxiliary_cleanup = mock.Mock()
+    with mock.patch.object(
+        hermes,
+        "_runtime_key",
+        return_value="profile-a",
+    ), mock.patch.object(
+        hermes,
+        "build_runtime",
+        side_effect=[first, second],
+    ) as builder, mock.patch.object(
+        hermes,
+        "install_exact_preflight",
+        return_value=preflight_cleanup,
+    ) as install_preflight, mock.patch.object(
+        hermes,
+        "install_auxiliary_budget",
+        return_value=auxiliary_cleanup,
+    ) as install_auxiliary:
+        hermes.register(first_context)
+        hermes.register(second_context)
+
+    assert builder.call_count == 2
+    install_preflight.assert_called_once_with(hermes.get_active_runtime)
+    install_auxiliary.assert_called_once_with(hermes.get_active_runtime)
+    assert preflight_cleanup.call_count == 0
+    assert auxiliary_cleanup.call_count == 0
+    assert hermes._active_profiles == {"profile-a": 1}
+    assert hermes._runtimes == {"profile-a": second}
+    assert first_context.calls == [("llm_request", hermes.apply_incontext)]
+    assert second_context.calls == [("llm_request", hermes.apply_incontext)]
+
+
+def test_failed_legacy_force_reload_releases_immortal_installation(
+    runtime_settings: Settings,
+) -> None:
+    """Deactivate legacy wrappers when force reload cannot register anew.
+
+    The old Hermes manager has already discarded its middleware before a force
+    reload.  If the replacement context rejects registration, retaining the
+    unobservable legacy owner would leave process-wide private hooks active
+    forever.  All original acquisitions must therefore be released in reverse
+    order and the cached runtime invalidated.
+    """
+
+    events: list[str] = []
+
+    class LegacyContext:
+        def __init__(self, *, reject: bool = False) -> None:
+            self.reject = reject
+
+        def register_middleware(self, kind: str, callback: Any) -> None:
+            del kind, callback
+            if self.reject:
+                raise RuntimeError("reload rejected")
+
+    first = mock.Mock()
+    first.settings = runtime_settings
+    second = mock.Mock()
+    second.settings = runtime_settings
+    with mock.patch.object(
+        hermes,
+        "_runtime_key",
+        return_value="profile-a",
+    ), mock.patch.object(
+        hermes,
+        "build_runtime",
+        side_effect=[first, second],
+    ), mock.patch.object(
+        hermes,
+        "install_exact_preflight",
+        return_value=lambda: events.append("preflight"),
+    ), mock.patch.object(
+        hermes,
+        "install_auxiliary_budget",
+        return_value=lambda: events.append("auxiliary"),
+    ):
+        hermes.register(LegacyContext())
+        with pytest.raises(RuntimeError, match="reload rejected"):
+            hermes.register(LegacyContext(reject=True))
+
+    assert events == ["auxiliary", "preflight"]
+    assert hermes._legacy_cleanups == {}
+    assert hermes._active_profiles == {}
+    assert hermes._runtimes == {}
+
+
 def test_register_skips_missing_cleanup_callbacks(
     runtime_settings: Settings,
 ) -> None:
