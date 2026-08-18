@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from importlib import import_module
+from inspect import Parameter, Signature, signature
 from typing import Any, Callable, Dict, cast
 
 from .budget import DynamicOutputBudget
@@ -22,38 +23,43 @@ class _AuxiliaryBudget:
     ) -> None:
         self.runtime = runtime
         self.original = original
+        self.signature: Signature = signature(original)
 
-    def __call__(  # noqa: PLR0913
-        self,
-        provider: str,
-        model: str,
-        messages: list[Any],
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        tools: list[Any] | None = None,
-        timeout: float = 30.0,
-        extra_body: dict[str, Any] | None = None,
-        base_url: str | None = None,
-    ) -> dict[str, Any]:
-        original_request = self.original(
-            provider,
-            model,
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            tools=tools,
-            timeout=timeout,
-            extra_body=extra_body,
-            base_url=base_url,
-        )
+    def __call__(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        original_request = self.original(*args, **kwargs)
+        bound = self.signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        model = self._argument(bound.arguments, "model")
+        if model != self.runtime.settings.model_name:
+            return original_request
+        max_tokens = self._argument(bound.arguments, "max_tokens")
         request = original_request
-        if max_tokens is not None:
+        has_output_cap = any(
+            field in original_request
+            for field in ("max_tokens", "max_completion_tokens", "max_output_tokens")
+        )
+        if (
+            not has_output_cap
+            and isinstance(max_tokens, int)
+            and not isinstance(max_tokens, bool)
+            and max_tokens > 0
+        ):
             # Hermes deliberately omits this field for most auxiliary custom
             # providers. Restore the caller's bound before incontext chooses
             # the smaller of it and the exact free compression-window space.
             request = {**request, "max_tokens": max_tokens}
         result = self.runtime(request=request)
         return original_request if result is None else result["request"]
+
+    def _argument(self, arguments: dict[str, Any], name: str) -> Any:
+        if name in arguments:
+            return arguments[name]
+        for parameter in self.signature.parameters.values():
+            if parameter.kind is Parameter.VAR_KEYWORD:
+                extra = arguments.get(parameter.name)
+                if isinstance(extra, dict) and name in extra:
+                    return extra[name]
+        return None
 
 
 def install(runtime: DynamicOutputBudget) -> AuxiliaryBuilder | None:

@@ -60,7 +60,9 @@ def install_fake_hermes(
         tools: list[Any] | None = None,
         timeout: float = 30.0,
         extra_body: dict[str, Any] | None = None,
+        reasoning_config: dict[str, Any] | None = None,
         base_url: str | None = None,
+        task: str | None = None,
     ) -> dict[str, Any]:
         del provider, max_tokens, base_url
         return {
@@ -70,6 +72,8 @@ def install_fake_hermes(
             "tools": tools,
             "timeout": timeout,
             "extra_body": extra_body,
+            "reasoning_config": reasoning_config,
+            "task": task,
         }
 
     auxiliary._build_call_kwargs = build  # type: ignore[attr-defined]
@@ -94,7 +98,9 @@ def test_install_preserves_a_smaller_auxiliary_output_bound(
         tools=[{"type": "function"}],
         timeout=3600,
         extra_body={"answer": 42},
+        reasoning_config={"effort": "high"},
         base_url="https://inference.invalid/v1",
+        task="compression",
     )
 
     assert result == {
@@ -104,6 +110,8 @@ def test_install_preserves_a_smaller_auxiliary_output_bound(
         "tools": [{"type": "function"}],
         "timeout": 3600,
         "extra_body": {"answer": 42},
+        "reasoning_config": {"effort": "high"},
+        "task": "compression",
         "max_tokens": 2048,
     }
     assert counter.requests == [result]
@@ -122,6 +130,98 @@ def test_auxiliary_without_a_caller_bound_uses_the_free_window(
     )
 
     assert result["max_tokens"] == 64_000 - 12_345
+
+
+def test_auxiliary_wrapper_accepts_additive_hermes_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forward newer Hermes builder arguments without signature drift.
+
+    Hermes 2026.8 added ``reasoning_config`` and ``task`` to the private
+    auxiliary builder used by every sync and async call path.  A wrapper that
+    duplicates the older signature raises ``TypeError`` before any provider
+    request, so incontext must transparently forward additive parameters.
+    """
+
+    auxiliary, _ = install_fake_hermes(monkeypatch)
+    install(runtime(Counter(12_345)))
+
+    result = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "reason"}],
+        reasoning_config={"effort": "high"},
+        task="compression",
+    )
+
+    assert result["reasoning_config"] == {"effort": "high"}
+    assert result["task"] == "compression"
+
+
+def test_auxiliary_wrapper_preserves_hermes_output_field() -> None:
+    """Respect a provider-specific cap already emitted by Hermes.
+
+    On newer OpenAI-family models Hermes emits ``max_completion_tokens``.
+    Reintroducing the caller's generic ``max_tokens`` would overwrite that
+    validated provider choice and cause HTTP 400 on the auxiliary request.
+    """
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        del provider, max_tokens
+        return {
+            "model": model,
+            "messages": messages,
+            "max_completion_tokens": 2048,
+        }
+
+    result = _AuxiliaryBudget(runtime(Counter(12_345)), build)(
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "summarize"}],
+        max_tokens=4096,
+    )
+
+    assert result["max_completion_tokens"] == 2048
+    assert "max_tokens" not in result
+
+
+def test_auxiliary_wrapper_ignores_a_different_fallback_model() -> None:
+    """Never tokenize an auxiliary fallback with the primary model backend.
+
+    Hermes can retry an auxiliary task on a different provider and model while
+    the process-wide incontext runtime still points at the primary vLLM model.
+    Applying that tokenizer and context window to the fallback would corrupt
+    its request; the original provider kwargs must pass through untouched.
+    """
+
+    counter = Counter(12_345)
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        del provider, max_tokens
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(runtime(counter), build)(
+        "openai",
+        "fallback-model",
+        [{"role": "user", "content": "retry"}],
+        max_tokens=4096,
+    )
+
+    assert result == {
+        "model": "fallback-model",
+        "messages": [{"role": "user", "content": "retry"}],
+    }
+    assert counter.requests == []
 
 
 @given(
@@ -192,6 +292,8 @@ def test_install_is_idempotent_and_updates_the_runtime(
             "tools": None,
             "timeout": 30.0,
             "extra_body": None,
+            "reasoning_config": None,
+            "task": None,
         }
     ]
 
