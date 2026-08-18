@@ -54,15 +54,16 @@ This addresses the same output-budget arithmetic discussed in
 
 ## Installation
 
-Once a release is available on PyPI, install and enable the package using the
-same plugin name, `incontext`:
+Once release 0.0.2 or newer is available on PyPI, install and enable the package
+using the same plugin name, `incontext`:
 
 ```bash
-python -m pip install incontext
+python -m pip install 'incontext>=0.0.2'
 hermes plugins enable incontext
 ```
 
-Until the first PyPI release, install the reviewed `develop` revision:
+Until that safety-complete release is published, install the reviewed `develop`
+revision:
 
 ```bash
 python -m pip install 'git+https://github.com/pomponchik/incontext.git@develop'

@@ -36,3 +36,19 @@ def test_readme_backend_example_runs_on_python_38() -> None:
 
     assert "from typing import Any, Dict" in contents
     assert "request: Dict[str, Any]" in contents
+
+
+def test_readme_pypi_install_cannot_select_an_older_release() -> None:
+    """Tie the documented PyPI path to the behavior described by this release.
+
+    Development documentation can advance before its distribution reaches
+    PyPI.  An unbounded install then succeeds with an older wheel lacking the
+    documented preflight and auxiliary safety mechanisms, so operators must be
+    given a version floor that fails visibly until the matching release exists.
+    """
+
+    contents = README.read_text(encoding="utf-8")
+    current = version("incontext")
+
+    assert f"python -m pip install 'incontext>={current}'" in contents
+    assert "Until the first PyPI release" not in contents
