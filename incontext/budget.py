@@ -197,7 +197,13 @@ class DynamicOutputBudget:
         request: dict[str, Any],
         context: dict[str, Any],
     ) -> bool:
-        if request.get("model") != self.settings.model_name:
+        extra_body = request.get("extra_body")
+        model = (
+            extra_body.get("model", request.get("model"))
+            if isinstance(extra_body, dict)
+            else request.get("model")
+        )
+        if model != self.settings.model_name:
             return False
         provider = context.get("provider")
         if (

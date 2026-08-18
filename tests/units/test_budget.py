@@ -254,6 +254,30 @@ def test_runtime_removes_extra_body_output_cap_override() -> None:
     }
 
 
+def test_runtime_rejects_extra_body_model_override(
+    runtime_settings: Settings,
+) -> None:
+    """Never budget a wire-level model override with the primary window.
+
+    OpenAI-compatible clients shallow-merge ``extra_body`` after their normal
+    request fields.  Consequently its model value is the provider-visible
+    route and must take precedence during scoping, just as it does in the
+    bundled backend; otherwise a fallback model receives the primary model's
+    token count and compression-window arithmetic.
+    """
+
+    counter = Counter(100)
+    runtime = budget.DynamicOutputBudget(runtime_settings, counter)
+    request = {
+        "model": runtime_settings.model_name,
+        "messages": [],
+        "extra_body": {"model": "fallback-model"},
+    }
+
+    assert runtime(request=request) is None
+    assert counter.requests == []
+
+
 @pytest.mark.parametrize(
     "invalid_cap",
     [None, True, False, 0, -1, 1.5, "2048"],
