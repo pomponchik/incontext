@@ -333,6 +333,25 @@ def _canonical_builtin_provider(provider: str) -> str:
     return resolved or provider
 
 
+def _effective_model_name(model: str, provider: str) -> str:
+    """Mirror Hermes' provider-aware model normalization when available."""
+
+    try:
+        from hermes_cli.model_normalize import (  # type: ignore[import-not-found]  # noqa: PLC0415
+            _AGGREGATOR_PROVIDERS,
+            normalize_model_for_provider,
+        )
+    except (ImportError, AttributeError):
+        return model
+    if provider in _AGGREGATOR_PROVIDERS:
+        return model
+    try:
+        normalized = normalize_model_for_provider(model, provider)
+    except Exception:  # noqa: BLE001
+        return model
+    return normalized if isinstance(normalized, str) and normalized.strip() else model
+
+
 def _effective_provider_route(
     model: Mapping[str, Any],
     providers: Mapping[str, Any],
@@ -445,8 +464,8 @@ def load_settings(
     compression = _section(raw_config, "compression")
     context = _section(raw_config, "context")
     providers = _section(raw_config, "providers")
-    model_name = model.get("default")
-    if not isinstance(model_name, str) or not model_name.strip():
+    configured_model_name = model.get("default")
+    if not isinstance(configured_model_name, str) or not configured_model_name.strip():
         raise SettingsError("Hermes model.default must be a non-empty string")
     context_length = _strict_int(
         model.get("context_length"),
@@ -454,6 +473,7 @@ def load_settings(
         minimum=1,
     )
     provider, base_url, provider_config = _effective_provider_route(model, providers)
+    model_name = _effective_model_name(configured_model_name.strip(), provider)
     threshold = _strict_float(
         compression.get("threshold", 0.50),
         "Hermes compression.threshold",
@@ -462,7 +482,7 @@ def load_settings(
     )
     threshold = _effective_compression_threshold(
         threshold,
-        model=model_name.strip(),
+        model=model_name,
         provider=provider,
         compression=compression,
     )
@@ -481,7 +501,7 @@ def load_settings(
         compressor = _construct_compressor(
             compressor_class,
             {
-                "model": model_name.strip(),
+                "model": model_name,
                 "threshold_percent": threshold,
                 "quiet_mode": True,
                 "base_url": base_url,
@@ -525,7 +545,7 @@ def load_settings(
         )
 
     return Settings(
-        model_name=model_name.strip(),
+        model_name=model_name,
         context_length=context_length,
         compression_window=compression_window,
         fallback_margin_tokens=fallback_margin,

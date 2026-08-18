@@ -572,6 +572,90 @@ def test_load_settings_keeps_provider_when_hermes_alias_resolution_fails(
     assert result.provider == "openai"
 
 
+def test_load_settings_uses_hermes_normalized_model_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use the same model identifier as ``AIAgent`` and its provider request.
+
+    Hermes normalizes ``zai/glm-5.1`` to ``glm-5.1`` before constructing its
+    compressor and request.  Keeping the raw configuration value makes route
+    scoping skip exact budgeting and can evaluate model-specific compression
+    policy under a different identity.
+    """
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []  # type: ignore[attr-defined]
+    model_normalize = types.ModuleType("hermes_cli.model_normalize")
+    calls: list[tuple[str, str]] = []
+
+    def normalize(model: str, provider: str) -> str:
+        calls.append((model, provider))
+        return model.split("/", 1)[-1]
+
+    model_normalize._AGGREGATOR_PROVIDERS = frozenset(  # type: ignore[attr-defined]
+        {"openrouter"}
+    )
+    model_normalize.normalize_model_for_provider = normalize  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.model_normalize",
+        model_normalize,
+    )
+    ModernCompressor.calls.clear()
+
+    result = load(
+        config={
+            **base_config,
+            "model": {
+                **base_config["model"],
+                "default": "zai/glm-5.1",
+                "provider": "zai",
+            },
+        },
+    )
+
+    assert result.model_name == "glm-5.1"
+    assert ModernCompressor.calls[-1]["model"] == "glm-5.1"
+    assert calls == [("zai/glm-5.1", "zai")]
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "zai"])
+def test_model_normalization_remains_best_effort_like_hermes(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+) -> None:
+    """Preserve Hermes' skip and failure behavior around model normalization.
+
+    Aggregators intentionally keep vendor-qualified model IDs and are never
+    passed through the direct-provider normalizer.  For other providers Hermes
+    catches normalization failures during agent initialization; incontext must
+    retain the configured model under the same conditions instead of making an
+    optional compatibility helper a startup dependency.
+    """
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []  # type: ignore[attr-defined]
+    model_normalize = types.ModuleType("hermes_cli.model_normalize")
+
+    def fail(model: str, selected_provider: str) -> str:
+        del model, selected_provider
+        raise RuntimeError("normalizer unavailable")
+
+    model_normalize._AGGREGATOR_PROVIDERS = frozenset(  # type: ignore[attr-defined]
+        {"openrouter"}
+    )
+    model_normalize.normalize_model_for_provider = fail  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.model_normalize",
+        model_normalize,
+    )
+
+    assert settings._effective_model_name("vendor/model", provider) == "vendor/model"
+
+
 def test_load_settings_passes_modern_compression_options() -> None:
     ModernCompressor.calls.clear()
     config = {
