@@ -317,6 +317,43 @@ def _named_provider_config(
     return None
 
 
+def _legacy_provider_config(
+    custom_providers: Any,
+    selector: str,
+) -> Optional[Mapping[str, Any]]:
+    """Find a saved list-style custom provider still supported by Hermes."""
+
+    if not isinstance(custom_providers, list):
+        return None
+    target = _normalized_provider_selector(selector)
+    for configured in custom_providers:
+        if not isinstance(configured, Mapping):
+            continue
+        candidates = (configured.get("name"), configured.get("provider_key"))
+        if target in {
+            _normalized_provider_selector(candidate)
+            for candidate in candidates
+            if candidate
+        }:
+            return configured
+    return None
+
+
+def _configured_provider(
+    providers: Mapping[str, Any],
+    custom_providers: Any,
+    selector: str,
+) -> Optional[Mapping[str, Any]]:
+    """Resolve the new mapping before Hermes' legacy provider list."""
+
+    configured = _named_provider_config(providers, selector)
+    return (
+        configured
+        if configured is not None
+        else _legacy_provider_config(custom_providers, selector)
+    )
+
+
 def _canonical_builtin_provider(provider: str) -> str:
     """Use Hermes' installed alias registry for ordinary provider selectors."""
 
@@ -355,6 +392,7 @@ def _effective_model_name(model: str, provider: str) -> str:
 def _effective_provider_route(
     model: Mapping[str, Any],
     providers: Mapping[str, Any],
+    custom_providers: Any = None,
 ) -> Tuple[str, str, Mapping[str, Any]]:
     """Resolve Hermes' selector into its live provider and endpoint identity."""
 
@@ -364,7 +402,11 @@ def _effective_provider_route(
     named = False
     if ":" in provider_selector:
         provider_prefix, provider_name = provider_selector.split(":", 1)
-        configured_provider = _named_provider_config(providers, provider_name)
+        configured_provider = _configured_provider(
+            providers,
+            custom_providers,
+            provider_name,
+        )
         if not provider_prefix or not provider_name or configured_provider is None:
             raise SettingsError(
                 "Hermes named model.provider must reference providers.<name>",
@@ -373,7 +415,11 @@ def _effective_provider_route(
         provider_config = configured_provider
         named = True
     elif provider_selector not in {"", "custom"}:
-        configured_provider = _named_provider_config(providers, provider_selector)
+        configured_provider = _configured_provider(
+            providers,
+            custom_providers,
+            provider_selector,
+        )
         if configured_provider is not None:
             provider = "custom"
             provider_config = configured_provider
@@ -384,6 +430,12 @@ def _effective_provider_route(
             provider = _canonical_builtin_provider(provider_selector)
     else:
         configured_provider = providers.get(provider)
+        if configured_provider is None and provider == "custom":
+            configured_provider = _legacy_provider_config(
+                custom_providers,
+                provider,
+            )
+            named = configured_provider is not None
         if configured_provider is not None:
             if not isinstance(configured_provider, Mapping):
                 raise SettingsError("Hermes providers entry must be a mapping")
@@ -472,7 +524,11 @@ def load_settings(
         "Hermes model.context_length",
         minimum=1,
     )
-    provider, base_url, provider_config = _effective_provider_route(model, providers)
+    provider, base_url, provider_config = _effective_provider_route(
+        model,
+        providers,
+        raw_config.get("custom_providers"),
+    )
     model_name = _effective_model_name(configured_model_name.strip(), provider)
     threshold = _strict_float(
         compression.get("threshold", 0.50),

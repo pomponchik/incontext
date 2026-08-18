@@ -388,6 +388,63 @@ def test_load_settings_matches_all_hermes_named_provider_selectors(
     assert result.base_url == "https://inference.example/v1"
 
 
+@pytest.mark.parametrize("selector", ["custom:local-vllm", "custom:edge-key"])
+def test_load_settings_resolves_legacy_custom_provider_route(selector: str) -> None:
+    """Honor the list-style custom-provider route still resolved by Hermes.
+
+    Hermes accepts legacy ``custom_providers`` entries by normalized display
+    name or ``provider_key`` and exposes either as provider ``custom`` plus the
+    entry endpoint.  Ignoring that persisted schema rejects a valid profile or
+    makes route guards miss every request; its output allowance must also reach
+    the reconstructed ``ContextCompressor`` boundary.
+    """
+
+    ModernCompressor.calls.clear()
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": selector,
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            "custom_providers": [
+                None,
+                {"name": "Unrelated", "base_url": "https://unused.invalid/v1"},
+                {
+                    "name": "Local vLLM",
+                    "provider_key": "edge_key",
+                    "base_url": "https://INFERENCE.EXAMPLE:443/v1/",
+                    "model": "qwen-test",
+                    "max_output_tokens": 2048,
+                },
+            ],
+        },
+    )
+
+    assert result.provider == "custom"
+    assert result.base_url == "https://inference.example/v1"
+    assert ModernCompressor.calls[-1]["max_tokens"] == 2048
+
+
+def test_legacy_custom_provider_lookup_returns_none_without_a_match() -> None:
+    """Do not attach an unrelated persisted endpoint to the primary route.
+
+    The legacy list can contain several valid providers.  Exhausting it
+    without a matching normalized name must leave resolution to Hermes' normal
+    built-in path; selecting the last unrelated entry would scope the vLLM
+    tokenizer and context window to the wrong external destination.
+    """
+
+    assert (
+        settings._legacy_provider_config(
+            [{"name": "Unrelated", "base_url": "https://unused.invalid/v1"}],
+            "missing",
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     ("provider_entry", "model_base_url"),
     [
