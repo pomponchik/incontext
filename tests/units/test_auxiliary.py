@@ -87,10 +87,11 @@ def install_fake_hermes(
 def test_install_preserves_a_smaller_auxiliary_output_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    auxiliary, original = install_fake_hermes(monkeypatch)
+    auxiliary, _ = install_fake_hermes(monkeypatch)
     counter = Counter(12_345)
 
-    assert install(runtime(counter)) is original
+    cleanup = install(runtime(counter))
+    assert callable(cleanup)
     result = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
         "custom",
         "qwen-test",
@@ -285,7 +286,7 @@ def test_auxiliary_wrapper_ignores_same_model_on_another_route() -> None:
         return {"model": model, "messages": messages}
 
     result = _AuxiliaryBudget(scoped_runtime, build)(
-        "openai",
+        "custom",
         "qwen-test",
         [{"role": "user", "content": "retry"}],
         base_url="https://fallback.invalid/v1",
@@ -296,6 +297,80 @@ def test_auxiliary_wrapper_ignores_same_model_on_another_route() -> None:
         "messages": [{"role": "user", "content": "retry"}],
     }
     assert counter.requests == []
+
+
+def test_auxiliary_wrapper_ignores_same_endpoint_on_another_provider() -> None:
+    """Use provider identity as well as the normalized endpoint URL.
+
+    Two Hermes providers may share a gateway URL but apply different wire
+    contracts and model routing.  Matching only the URL and model would still
+    let the primary backend rewrite a fallback request owned by another route.
+    """
+
+    counter = Counter(12_345)
+    scoped_runtime = DynamicOutputBudget(
+        Settings(
+            model_name="qwen-test",
+            context_length=65_536,
+            compression_window=64_000,
+            fallback_margin_tokens=1024,
+            provider="custom",
+            base_url="https://shared.invalid/v1",
+        ),
+        counter,
+    )
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        base_url: str | None = None,
+    ) -> dict[str, Any]:
+        del provider, base_url
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(scoped_runtime, build)(
+        "openai",
+        "qwen-test",
+        [{"role": "user", "content": "retry"}],
+        base_url="https://shared.invalid/v1",
+    )
+
+    assert "max_tokens" not in result
+    assert counter.requests == []
+
+
+def test_auxiliary_runtime_resolver_tracks_the_active_profile() -> None:
+    """Resolve the profile-scoped runtime at call time, not installation time.
+
+    A single process-global Hermes builder wrapper serves multiple active homes
+    in 2026.8.  The resolver must therefore be invoked for every request so a
+    profile switch cannot retain the previous profile's backend and window.
+    """
+
+    active = runtime(Counter(12_345))
+    calls: list[None] = []
+
+    def resolve() -> DynamicOutputBudget:
+        calls.append(None)
+        return active
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+    ) -> dict[str, Any]:
+        del provider
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(resolve, build)(
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "profile"}],
+    )
+
+    assert result["max_tokens"] == 64_000 - 12_345
+    assert calls == [None]
 
 
 @given(
@@ -344,12 +419,14 @@ def test_auxiliary_fails_open_when_compression_is_required(
 def test_install_is_idempotent_and_updates_the_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    auxiliary, original = install_fake_hermes(monkeypatch)
+    auxiliary, _ = install_fake_hermes(monkeypatch)
     first = Counter(10_000)
     second = Counter(20_000)
 
-    assert install(runtime(first)) is original
-    assert install(runtime(second)) is original
+    first_cleanup = install(runtime(first))
+    second_cleanup = install(runtime(second))
+    assert callable(first_cleanup)
+    assert callable(second_cleanup)
     result = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
         "custom",
         "qwen-test",
@@ -370,6 +447,77 @@ def test_install_is_idempotent_and_updates_the_runtime(
             "task": None,
         }
     ]
+
+
+def test_cleanup_restores_builder_after_the_last_plugin_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the global wrapper until every profile unloads, then restore it.
+
+    Hermes 2026.8 can load one entry-point plugin for multiple profile-scoped
+    managers in a single process.  Unloading either owner must not disable the
+    other, while the final callback must conditionally restore the exact
+    original builder and remain safe if invoked twice.
+    """
+
+    auxiliary, original = install_fake_hermes(monkeypatch)
+    first_cleanup = install(runtime(Counter(100)))
+    second_cleanup = install(runtime(Counter(200)))
+    assert callable(first_cleanup)
+    assert callable(second_cleanup)
+    wrapper = auxiliary._build_call_kwargs  # type: ignore[attr-defined]
+
+    first_cleanup()
+    assert auxiliary._build_call_kwargs is wrapper  # type: ignore[attr-defined]
+    first_cleanup()
+    assert auxiliary._build_call_kwargs is wrapper  # type: ignore[attr-defined]
+
+    second_cleanup()
+    assert auxiliary._build_call_kwargs is original  # type: ignore[attr-defined]
+
+
+def test_cleanup_never_overwrites_a_later_auxiliary_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Condition restoration on ownership of the current Hermes binding.
+
+    Another plugin may replace the builder after incontext registers.  Its
+    callable must survive incontext unload; cleanup only releases internal
+    ownership and must never put an older function back over newer state.
+    """
+
+    auxiliary, _ = install_fake_hermes(monkeypatch)
+    cleanup = install(runtime(Counter(100)))
+    assert callable(cleanup)
+
+    replacement = lambda *args, **kwargs: {}  # noqa: E731
+    auxiliary._build_call_kwargs = replacement  # type: ignore[attr-defined]
+    cleanup()
+
+    assert auxiliary._build_call_kwargs is replacement  # type: ignore[attr-defined]
+
+
+def test_stale_auxiliary_cleanup_cannot_remove_a_new_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ignore an unload callback whose wrapper is no longer globally active.
+
+    Force rediscovery can replace the module binding and establish a new owner
+    before an older manager disposes its ledger.  The stale callback must not
+    decrement or restore the new installation's reference count.
+    """
+
+    _, _ = install_fake_hermes(monkeypatch)
+    stale_cleanup = install(runtime(Counter(100)))
+    assert callable(stale_cleanup)
+
+    second_auxiliary, _ = install_fake_hermes(monkeypatch)
+    active_cleanup = install(runtime(Counter(200)))
+    assert callable(active_cleanup)
+    active_wrapper = second_auxiliary._build_call_kwargs  # type: ignore[attr-defined]
+
+    stale_cleanup()
+    assert second_auxiliary._build_call_kwargs is active_wrapper  # type: ignore[attr-defined]
 
 
 def test_install_reports_absent_hermes(caplog: pytest.LogCaptureFixture) -> None:

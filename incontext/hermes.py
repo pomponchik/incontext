@@ -13,7 +13,7 @@ from .preflight import install as install_exact_preflight
 from .settings import Environment, load_settings
 
 LOGGER = logging.getLogger(__name__)
-_runtime: DynamicOutputBudget | None = None
+_runtimes: dict[str, DynamicOutputBudget] = {}
 _runtime_lock = threading.Lock()
 
 
@@ -27,14 +27,30 @@ def build_runtime() -> DynamicOutputBudget:
 
 
 def get_runtime() -> DynamicOutputBudget:
-    """Return the process-wide runtime, constructing it exactly once."""
+    """Return the runtime scoped to the active Hermes profile/home."""
 
-    global _runtime  # noqa: PLW0603
-    if _runtime is None:
-        with _runtime_lock:
-            if _runtime is None:
-                _runtime = build_runtime()
-    return _runtime
+    key = _runtime_key()
+    with _runtime_lock:
+        runtime = _runtimes.get(key)
+        if runtime is None:
+            runtime = build_runtime()
+            _runtimes[key] = runtime
+        return runtime
+
+
+def _runtime_key() -> str:
+    """Resolve Hermes' ContextVar-aware home without making it a dependency."""
+
+    try:
+        from hermes_constants import (  # type: ignore[import-not-found]  # noqa: PLC0415
+            get_hermes_home,
+        )
+    except ImportError:
+        return ""
+    try:
+        return str(get_hermes_home().expanduser().resolve())
+    except Exception:  # noqa: BLE001
+        return str(get_hermes_home())
 
 
 def apply_incontext(
@@ -51,8 +67,14 @@ def register(ctx: Any) -> None:
     """Register the plugin with a Hermes ``PluginContext``."""
 
     runtime = get_runtime()
-    install_exact_preflight(runtime)
-    install_auxiliary_budget(runtime)
+    preflight_cleanup = install_exact_preflight(get_runtime)
+    auxiliary_cleanup = install_auxiliary_budget(get_runtime)
+    on_unload = getattr(ctx, "on_unload", None)
+    if callable(on_unload):
+        if preflight_cleanup is not None:
+            on_unload(preflight_cleanup)
+        if auxiliary_cleanup is not None:
+            on_unload(auxiliary_cleanup)
     ctx.register_middleware("llm_request", apply_incontext)
     LOGGER.info(
         "incontext registered context=%d compression_window=%d",
@@ -62,6 +84,5 @@ def register(ctx: Any) -> None:
 
 
 def _reset_runtime_for_tests() -> None:
-    global _runtime  # noqa: PLW0603
     with _runtime_lock:
-        _runtime = None
+        _runtimes.clear()

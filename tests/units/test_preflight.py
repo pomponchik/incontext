@@ -8,7 +8,7 @@ import pytest
 
 from incontext.backend import Backend
 from incontext.budget import DynamicOutputBudget
-from incontext.preflight import install
+from incontext.preflight import _ExactPreflight, install
 from incontext.settings import Settings
 
 
@@ -39,6 +39,8 @@ def runtime(counter: Counter) -> DynamicOutputBudget:
             context_length=65_536,
             compression_window=64_000,
             fallback_margin_tokens=1024,
+            provider="",
+            base_url="",
         ),
         counter,
     )
@@ -81,9 +83,9 @@ def test_install_replaces_rough_preflight_with_exact_backend(
 
     loop, turn_context = install_fake_hermes(monkeypatch, rough)
     counter = Counter(64_000)
-    original = install(runtime(counter))
+    cleanup = install(runtime(counter))
 
-    assert original is rough
+    assert callable(cleanup)
     for module in (loop, turn_context):
         assert (
             module.estimate_request_tokens_rough(
@@ -237,11 +239,151 @@ def test_install_is_idempotent_and_retains_the_initial_fallback(
     loop, _ = install_fake_hermes(monkeypatch, rough)
     first = Counter(100)
     second = Counter(200)
-    assert install(runtime(first)) is rough
-    assert install(runtime(second)) is rough
+    first_cleanup = install(runtime(first))
+    second_cleanup = install(runtime(second))
+    assert callable(first_cleanup)
+    assert callable(second_cleanup)
     assert loop.estimate_request_tokens_rough([]) == 200
     assert first.requests == []
     assert second.requests == [{"model": "qwen-test", "messages": []}]
+
+
+def test_cleanup_restores_all_preflight_bindings_after_final_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reference-count profile owners and restore only unchanged bindings.
+
+    Both Hermes modules hold independent imported estimator names.  With two
+    active profile managers, the first unload must leave both wrappers intact;
+    the final unload restores each original and a duplicate callback is a no-op.
+    """
+
+    def rough(
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+    ) -> int:
+        del messages, system_prompt, tools
+        return 5
+
+    loop, turn_context = install_fake_hermes(monkeypatch, rough)
+    first_cleanup = install(runtime(Counter(100)))
+    second_cleanup = install(runtime(Counter(200)))
+    assert callable(first_cleanup)
+    assert callable(second_cleanup)
+    loop_wrapper = loop.estimate_request_tokens_rough
+    turn_wrapper = turn_context.estimate_request_tokens_rough
+
+    first_cleanup()
+    assert loop.estimate_request_tokens_rough is loop_wrapper
+    assert turn_context.estimate_request_tokens_rough is turn_wrapper
+
+    second_cleanup()
+    second_cleanup()
+    assert loop.estimate_request_tokens_rough is rough
+    assert turn_context.estimate_request_tokens_rough is rough
+
+
+def test_preflight_runtime_resolver_tracks_the_active_profile() -> None:
+    """Obtain the profile-specific backend for every preflight estimate.
+
+    Hermes keeps one pair of imported estimator bindings process-wide while its
+    active home is ContextVar-scoped.  Resolving lazily ensures the wrapper uses
+    the runtime belonging to the profile that initiated this particular turn.
+    """
+
+    active = runtime(Counter(456))
+    calls: list[None] = []
+
+    def resolve() -> DynamicOutputBudget:
+        calls.append(None)
+        return active
+
+    def rough(
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+    ) -> int:
+        del messages, system_prompt, tools
+        return 5
+
+    wrapper = _ExactPreflight(resolve, rough)
+
+    assert wrapper([]) == 456
+    assert calls == [None]
+
+
+def test_cleanup_never_overwrites_later_preflight_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preserve another plugin's estimator replacement during unload.
+
+    Cleanup owns only the exact wrapper objects it installed.  If either Hermes
+    module receives a later replacement, unloading incontext must leave that
+    callable intact while restoring only bindings that still belong to it.
+    """
+
+    def rough(
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+    ) -> int:
+        del messages, system_prompt, tools
+        return 5
+
+    loop, turn_context = install_fake_hermes(monkeypatch, rough)
+    cleanup = install(runtime(Counter(100)))
+    assert callable(cleanup)
+
+    def replacement(
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+    ) -> int:
+        del messages, system_prompt, tools
+        return 99
+
+    turn_context.estimate_request_tokens_rough = replacement  # type: ignore[attr-defined]
+    cleanup()
+
+    assert loop.estimate_request_tokens_rough is rough
+    assert turn_context.estimate_request_tokens_rough is replacement
+
+
+def test_stale_preflight_cleanup_cannot_remove_new_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ignore cleanup from a manager superseded by force rediscovery.
+
+    A new pair of module bindings can become active before an older profile
+    manager runs its unload ledger.  The old callback must recognize that its
+    wrapper tuple is stale and leave the replacement installation untouched.
+    """
+
+    def rough(
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+    ) -> int:
+        del messages, system_prompt, tools
+        return 5
+
+    install_fake_hermes(monkeypatch, rough)
+    stale_cleanup = install(runtime(Counter(100)))
+    assert callable(stale_cleanup)
+
+    second_loop, _ = install_fake_hermes(monkeypatch, rough)
+    active_cleanup = install(runtime(Counter(200)))
+    assert callable(active_cleanup)
+    active_wrapper = second_loop.estimate_request_tokens_rough
+
+    stale_cleanup()
+    assert second_loop.estimate_request_tokens_rough is active_wrapper
 
 
 def test_install_reports_absent_hermes(caplog: pytest.LogCaptureFixture) -> None:
