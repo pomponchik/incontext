@@ -262,6 +262,44 @@ def _effective_compression_threshold(
     )
 
 
+def _effective_provider_route(
+    model: Mapping[str, Any],
+    providers: Mapping[str, Any],
+) -> Tuple[str, str, Mapping[str, Any]]:
+    """Resolve Hermes' selector into its live provider and endpoint identity."""
+
+    provider_selector = str(model.get("provider") or "").strip().lower()
+    provider = provider_selector
+    provider_config: Mapping[str, Any] = {}
+    if ":" in provider_selector:
+        provider, provider_name = provider_selector.split(":", 1)
+        configured_provider = providers.get(provider_name)
+        if (
+            not provider
+            or not provider_name
+            or not isinstance(
+                configured_provider,
+                Mapping,
+            )
+        ):
+            raise SettingsError(
+                "Hermes named model.provider must reference providers.<name>",
+            )
+        provider_config = configured_provider
+    else:
+        configured_provider = providers.get(provider)
+        if configured_provider is not None:
+            if not isinstance(configured_provider, Mapping):
+                raise SettingsError("Hermes providers entry must be a mapping")
+            provider_config = configured_provider
+    base_url = normalize_base_url(
+        model.get("base_url")
+        or provider_config.get("api")
+        or provider_config.get("base_url"),
+    )
+    return provider, base_url, provider_config
+
+
 def load_settings(
     *,
     environment: Optional[Environment] = None,
@@ -287,6 +325,7 @@ def load_settings(
 
     model = _section(raw_config, "model")
     compression = _section(raw_config, "compression")
+    providers = _section(raw_config, "providers")
     model_name = model.get("default")
     if not isinstance(model_name, str) or not model_name.strip():
         raise SettingsError("Hermes model.default must be a non-empty string")
@@ -295,8 +334,7 @@ def load_settings(
         "Hermes model.context_length",
         minimum=1,
     )
-    provider = str(model.get("provider") or "").strip().lower()
-    base_url = normalize_base_url(model.get("base_url"))
+    provider, base_url, _provider_config = _effective_provider_route(model, providers)
     configured_max_tokens = model.get("max_tokens")
     max_tokens = (
         None

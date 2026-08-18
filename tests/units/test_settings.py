@@ -295,12 +295,77 @@ def test_load_settings_normalizes_provider_like_hermes() -> None:
             "provider": " Custom ",
             "base_url": "https://INFERENCE.EXAMPLE:443/v1/",
         },
+        "providers": {"custom": {"api": "https://fallback.invalid/v1"}},
     }
 
     result = load(config=config)
 
     assert result.provider == "custom"
     assert result.base_url == "https://inference.example/v1"
+
+
+def test_load_settings_uses_effective_named_custom_route() -> None:
+    """Scope budgeting to the route Hermes actually sends over the wire.
+
+    Hermes resolves ``model.provider: custom:local`` through ``providers.local``
+    before invoking request middleware: the live context contains provider
+    ``custom`` and the provider entry's API URL.  Keeping the selector literal
+    and an empty raw ``model.base_url`` makes both public and auxiliary
+    budgeting reject the configured primary route entirely.
+    """
+
+    config = {
+        **base_config,
+        "model": {
+            "default": "qwen-test",
+            "provider": "custom:local",
+            "context_length": 65_536,
+        },
+        "providers": {
+            "local": {
+                "api": "https://INFERENCE.EXAMPLE:443/v1/",
+                "default_model": "qwen-test",
+            },
+        },
+    }
+
+    result = load(config=config)
+
+    assert result.provider == "custom"
+    assert result.base_url == "https://inference.example/v1"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {
+            **base_config,
+            "model": {**base_config["model"], "provider": "custom:missing"},
+        },
+        {
+            **base_config,
+            "model": {**base_config["model"], "provider": "custom:"},
+            "providers": {"custom": {}},
+        },
+        {
+            **base_config,
+            "providers": {"custom": "invalid"},
+        },
+    ],
+)
+def test_load_settings_rejects_invalid_provider_route_configuration(
+    config: Mapping[str, Any],
+) -> None:
+    """Fail startup when provider scoping cannot match Hermes' live route.
+
+    Missing named entries, empty selectors, and non-mapping provider records
+    cannot yield a reliable provider/base-URL identity.  Silently accepting
+    them would either disable dynamic budgeting or apply the primary tokenizer
+    and context window to a different fallback endpoint.
+    """
+
+    with pytest.raises(settings.SettingsError, match="provider"):
+        load(config=config)
 
 
 def test_load_settings_passes_modern_compression_options() -> None:
