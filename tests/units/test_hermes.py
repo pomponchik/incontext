@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import sys
+import threading
 import types
 from pathlib import Path
 from typing import Any
@@ -152,6 +153,37 @@ def test_profile_runtime_survives_until_its_last_owner_unloads() -> None:
 
     hermes._deactivate_profile("profile-a")
 
+    assert hermes._active_profiles == {"profile-a": 1}
+    assert hermes._runtimes == {"profile-a": runtime}
+
+
+def test_profile_cleanup_is_concurrently_idempotent() -> None:
+    """Release exactly one owner when duplicate cleanup races without the GIL.
+
+    Hermes rollback and unload-ledger disposal can converge on the same
+    idempotent callback.  On free-threaded CPython an unprotected closure
+    check/set lets multiple callers decrement the profile count, invalidating
+    the runtime owned by another manager.  A per-callback lock must preserve
+    that independent owner under a synchronized burst of duplicate calls.
+    """
+
+    runtime = mock.create_autospec(DynamicOutputBudget, instance=True)
+    hermes._runtimes["profile-a"] = runtime
+    cleanup = hermes._activate_profile("profile-a")
+    hermes._activate_profile("profile-a")
+    start = threading.Barrier(16)
+
+    def release() -> None:
+        start.wait(timeout=2)
+        cleanup()
+
+    workers = [threading.Thread(target=release) for _ in range(16)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=2)
+
+    assert all(not worker.is_alive() for worker in workers)
     assert hermes._active_profiles == {"profile-a": 1}
     assert hermes._runtimes == {"profile-a": runtime}
 

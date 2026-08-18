@@ -62,12 +62,14 @@ def _activate_profile(key: str) -> Callable[[], None]:
         _active_profiles[key] = _active_profiles.get(key, 0) + 1
 
     closed = False
+    cleanup_lock = threading.Lock()
 
     def cleanup() -> None:
         nonlocal closed
-        if closed:
-            return
-        closed = True
+        with cleanup_lock:
+            if closed:
+                return
+            closed = True
         _deactivate_profile(key)
 
     return cleanup
