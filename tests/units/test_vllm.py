@@ -233,7 +233,9 @@ def test_build_payload_normalizes_deprecated_reasoning_content() -> None:
     vLLM's chat-completion validator migrates legacy ``reasoning_content`` to
     ``reasoning`` before rendering, while its tokenize request accepts only the
     new field.  Mirroring the migration avoids an exact-count drift and must
-    not mutate the request that Hermes may reuse for retries.
+    not mutate the request that Hermes may reuse for retries.  An explicit
+    modern null is considered unset, while a null legacy value is simply
+    removed, matching the provider's null-aware validator exactly.
     """
 
     legacy = {
@@ -247,7 +249,24 @@ def test_build_payload_normalizes_deprecated_reasoning_content() -> None:
         "reasoning": "preferred trace",
         "reasoning_content": "obsolete trace",
     }
-    messages: list[Any] = ["invalid-provider-value", legacy, modern]
+    explicit_null = {
+        "role": "assistant",
+        "content": "answer",
+        "reasoning": None,
+        "reasoning_content": "fallback trace",
+    }
+    empty_legacy = {
+        "role": "assistant",
+        "content": "answer",
+        "reasoning_content": None,
+    }
+    messages: list[Any] = [
+        "invalid-provider-value",
+        legacy,
+        modern,
+        explicit_null,
+        empty_legacy,
+    ]
 
     payload = VllmBackend._build_payload({"model": "qwen", "messages": messages})
 
@@ -263,9 +282,20 @@ def test_build_payload_normalizes_deprecated_reasoning_content() -> None:
             "content": "answer",
             "reasoning": "preferred trace",
         },
+        {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning": "fallback trace",
+        },
+        {
+            "role": "assistant",
+            "content": "answer",
+        },
     ]
     assert legacy["reasoning_content"] == "private trace"
     assert modern["reasoning_content"] == "obsolete trace"
+    assert explicit_null["reasoning"] is None
+    assert empty_legacy["reasoning_content"] is None
 
 
 def test_reasoning_normalization_preserves_unvalidated_message_shapes() -> None:

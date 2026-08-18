@@ -247,7 +247,11 @@ class VllmBackend(Backend):
                 continue
             normalized_message = dict(message)
             reasoning_content = normalized_message.pop("reasoning_content")
-            normalized_message.setdefault("reasoning", reasoning_content)
+            if (
+                reasoning_content is not None
+                and normalized_message.get("reasoning") is None
+            ):
+                normalized_message["reasoning"] = reasoning_content
             normalized.append(normalized_message)
         return normalized
 
