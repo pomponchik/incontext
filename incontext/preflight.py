@@ -9,7 +9,7 @@ from typing import Any, Callable, cast
 from .budget import DynamicOutputBudget
 
 LOGGER = logging.getLogger(__name__)
-RoughEstimator = Callable[[Any, Any], int]
+RoughEstimator = Callable[..., int]
 
 
 class _ExactPreflight:
@@ -23,12 +23,30 @@ class _ExactPreflight:
         self.runtime = runtime
         self.original = original
 
-    def __call__(self, messages: Any, tools: Any = None) -> int:
+    def __call__(
+        self,
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+    ) -> int:
         if not isinstance(messages, list):
-            return int(self.original(messages, tools))
+            return int(
+                self.original(
+                    messages,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                ),
+            )
+        provider_messages = list(messages)
+        if system_prompt:
+            provider_messages.insert(
+                0,
+                {"role": "system", "content": system_prompt},
+            )
         request: dict[str, Any] = {
             "model": self.runtime.settings.model_name,
-            "messages": messages,
+            "messages": provider_messages,
         }
         if isinstance(tools, list) and tools:
             request["tools"] = tools
@@ -43,7 +61,13 @@ class _ExactPreflight:
                 "using Hermes rough estimate",
                 type(exc).__name__,
             )
-            return int(self.original(messages, tools))
+            return int(
+                self.original(
+                    messages,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                ),
+            )
 
 
 def install(runtime: DynamicOutputBudget) -> RoughEstimator | None:
@@ -60,19 +84,24 @@ def install(runtime: DynamicOutputBudget) -> RoughEstimator | None:
     """
 
     try:
+        turn_context = import_module("agent.turn_context")
         conversation_loop = import_module("agent.conversation_loop")
     except ImportError:
         LOGGER.warning("incontext exact preflight unavailable: Hermes is not installed")
         return None
 
-    current = conversation_loop.__dict__["estimate_request_tokens_rough"]
-    original = (
-        current.original
-        if isinstance(current, _ExactPreflight)
-        else cast(RoughEstimator, current)
-    )
-    conversation_loop.__dict__["estimate_request_tokens_rough"] = _ExactPreflight(
-        runtime,
-        original,
-    )
+    original: RoughEstimator | None = None
+    for module in (turn_context, conversation_loop):
+        current = module.__dict__["estimate_request_tokens_rough"]
+        module_original = (
+            current.original
+            if isinstance(current, _ExactPreflight)
+            else cast(RoughEstimator, current)
+        )
+        if original is None:
+            original = module_original
+        module.__dict__["estimate_request_tokens_rough"] = _ExactPreflight(
+            runtime,
+            module_original,
+        )
     return original
