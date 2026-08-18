@@ -52,6 +52,22 @@ class Environment(
     )
 
 
+class HermesEnvironment(
+    Storage,
+    sources=cast(Any, [*EnvSource.for_library("hermes")]),
+):
+    """Hermes-owned environment overrides that affect compression policy."""
+
+    max_tokens: int = Field(
+        0,
+        validation={
+            "max_tokens must be positive": lambda value: value > 0,
+        },
+        validate_default=False,
+        read_only=True,
+    )
+
+
 @dataclass(frozen=True)
 class Settings:
     """Validated immutable runtime settings."""
@@ -300,6 +316,28 @@ def _effective_provider_route(
     return provider, base_url, provider_config
 
 
+def _effective_max_tokens(
+    model: Mapping[str, Any],
+    provider_config: Mapping[str, Any],
+    environment: HermesEnvironment,
+) -> Optional[int]:
+    """Resolve Hermes' output allowance in the same precedence order."""
+
+    if environment.max_tokens > 0:
+        return environment.max_tokens
+    configured = model.get("max_tokens")
+    if configured is not None:
+        return _strict_int(configured, "Hermes model.max_tokens", minimum=1)
+    provider_configured = provider_config.get("max_output_tokens")
+    if provider_configured is not None:
+        return _strict_int(
+            provider_configured,
+            "Hermes provider max_output_tokens",
+            minimum=1,
+        )
+    return None
+
+
 def load_settings(
     *,
     environment: Optional[Environment] = None,
@@ -334,17 +372,7 @@ def load_settings(
         "Hermes model.context_length",
         minimum=1,
     )
-    provider, base_url, _provider_config = _effective_provider_route(model, providers)
-    configured_max_tokens = model.get("max_tokens")
-    max_tokens = (
-        None
-        if configured_max_tokens is None
-        else _strict_int(
-            configured_max_tokens,
-            "Hermes model.max_tokens",
-            minimum=1,
-        )
-    )
+    provider, base_url, provider_config = _effective_provider_route(model, providers)
     threshold = _strict_float(
         compression.get("threshold", 0.50),
         "Hermes compression.threshold",
@@ -360,8 +388,11 @@ def load_settings(
 
     try:
         environment = Environment() if environment is None else environment
+        hermes_environment = HermesEnvironment()
     except (TypeError, ValueError) as exc:
         raise SettingsError(str(exc)) from exc
+
+    max_tokens = _effective_max_tokens(model, provider_config, hermes_environment)
 
     window_override = environment.compression_window_tokens
     if window_override == 0:

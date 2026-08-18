@@ -615,6 +615,47 @@ def test_load_settings_reserves_hermes_configured_output_budget() -> None:
     assert ModernCompressor.calls[-1]["max_tokens"] == 8192
 
 
+def test_load_settings_reserves_hermes_environment_output_budget() -> None:
+    """Rebuild the same boundary when Hermes' environment override is active.
+
+    Hermes gives ``HERMES_MAX_TOKENS`` precedence over model and provider
+    completion allowances before constructing its live compressor.  The
+    override is not folded into ``load_config()``, so it must be read through a
+    typed skelet storage or incontext would derive a larger unsafe window.
+    """
+
+    ModernCompressor.calls.clear()
+    config = {
+        **base_config,
+        "model": {**base_config["model"], "max_tokens": 4096},
+        "providers": {"custom": {"max_output_tokens": 2048}},
+    }
+
+    load(environment={"HERMES_MAX_TOKENS": "8192"}, config=config)
+
+    assert ModernCompressor.calls[-1]["max_tokens"] == 8192
+
+
+def test_load_settings_reserves_provider_output_budget() -> None:
+    """Use the selected provider allowance when no higher-priority cap exists.
+
+    Hermes promotes ``providers.<route>.max_output_tokens`` into the agent's
+    effective completion allowance.  Passing that same value to the rebuilt
+    compressor keeps its threshold identical for both named and direct custom
+    routes instead of budgeting beyond the live compression boundary.
+    """
+
+    ModernCompressor.calls.clear()
+    config = {
+        **base_config,
+        "providers": {"custom": {"max_output_tokens": "2048"}},
+    }
+
+    load(config=config)
+
+    assert ModernCompressor.calls[-1]["max_tokens"] == 2048
+
+
 @pytest.mark.parametrize("value", [True, 0, -1, "invalid"])
 def test_load_settings_rejects_invalid_hermes_output_budget(value: Any) -> None:
     """Reject malformed output reserves before deriving a false window.
@@ -630,6 +671,23 @@ def test_load_settings_rejects_invalid_hermes_output_budget(value: Any) -> None:
     }
 
     with pytest.raises(settings.SettingsError, match=r"model\.max_tokens"):
+        load(config=config)
+
+
+def test_load_settings_rejects_invalid_provider_output_budget() -> None:
+    """Reject a malformed effective provider reserve before window derivation.
+
+    An invalid selected provider allowance cannot be silently omitted because
+    Hermes may reject it or derive a different threshold; startup failure is
+    safer than claiming exact budgeting against a fictitious compressor.
+    """
+
+    config = {
+        **base_config,
+        "providers": {"custom": {"max_output_tokens": "invalid"}},
+    }
+
+    with pytest.raises(settings.SettingsError, match="provider max_output_tokens"):
         load(config=config)
 
 
