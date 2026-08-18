@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import threading
 import urllib.request
 from collections import OrderedDict
@@ -284,11 +285,22 @@ class VllmBackend(Backend):
             if isinstance(extra_body, dict)
             else request.get("truncate_prompt_tokens")
         )
-        if value == -1:
+        coerced: Optional[int]
+        if isinstance(value, bool):
+            coerced = int(value)
+        elif isinstance(value, int):
+            coerced = value
+        elif (
+            isinstance(value, float) and math.isfinite(value) and value.is_integer()
+        ) or (isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip())):
+            coerced = int(value)
+        else:
+            coerced = None
+        if coerced == -1:
             raise cls.VllmBackendError(
                 "truncate_prompt_tokens=-1 depends on the provider output budget",
             )
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        if coerced is None or coerced <= 0:
             return None
         if cls._has_multimodal_content(request):
             # vLLM truncates rendered text token IDs before expanding media
@@ -296,7 +308,7 @@ class VllmBackend(Backend):
             # than this textual limit; the tokenize endpoint's expanded count
             # is the only conservative value available to this client.
             return None
-        return value
+        return coerced
 
     @classmethod
     def _reused_prompt_token_count(cls, request: Dict[str, Any]) -> Optional[int]:

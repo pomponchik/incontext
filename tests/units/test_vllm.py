@@ -626,6 +626,64 @@ def test_count_honors_extra_body_prompt_truncation_override() -> None:
     assert backend.count(request, context_length=65_536) == 30
 
 
+@pytest.mark.parametrize(
+    ("wire_value", "expected"),
+    [(True, 1), ("2", 2), (3.0, 3)],
+)
+def test_count_honors_prompt_truncation_values_coerced_by_vllm(
+    wire_value: Any,
+    expected: int,
+) -> None:
+    """Match vLLM ChatCompletionRequest's non-strict integer validation.
+
+    vLLM coerces JSON booleans, integer strings, and integral floats before
+    applying prompt truncation.  Because ``/tokenize`` returns the untruncated
+    rendering, ignoring an accepted wire value counts tokens generation drops
+    and can trigger premature compression or reduce the available completion.
+    """
+
+    backend, _ = make_backend([response(120)])
+
+    assert (
+        backend.count(
+            {
+                "model": "qwen",
+                "messages": [],
+                "truncate_prompt_tokens": wire_value,
+            },
+            context_length=65_536,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("wire_value", [1.5, float("nan"), "invalid", object()])
+def test_count_does_not_invent_invalid_prompt_truncation_coercions(
+    wire_value: Any,
+) -> None:
+    """Keep the raw safe count for values vLLM cannot coerce to an integer.
+
+    Treating a rejected or fractional value as a truncation limit could
+    undercount a prompt if the provider ignores or rejects that field.  Only
+    coercions known to match the provider contract may reduce the tokenizer's
+    complete rendered count.
+    """
+
+    backend, _ = make_backend([response(120)])
+
+    assert (
+        backend.count(
+            {
+                "model": "qwen",
+                "messages": [],
+                "truncate_prompt_tokens": wire_value,
+            },
+            context_length=65_536,
+        )
+        == 120
+    )
+
+
 def test_count_does_not_cap_multimodal_prompt_after_media_expansion() -> None:
     """Keep vLLM's final expanded count for truncated multimodal input.
 
@@ -823,7 +881,10 @@ def test_count_ignores_kv_transfer_metadata_without_reused_prompt_ids() -> None:
     assert len(opener.calls) == 1
 
 
-def test_unbounded_prompt_truncation_fails_open_before_tokenization() -> None:
+@pytest.mark.parametrize("wire_value", [-1, "-1"])
+def test_unbounded_prompt_truncation_fails_open_before_tokenization(
+    wire_value: Any,
+) -> None:
     """Reject vLLM's dynamic ``-1`` sentinel instead of inventing a count.
 
     For chat generation ``-1`` maps to the model input allowance after the
@@ -843,7 +904,7 @@ def test_unbounded_prompt_truncation_fails_open_before_tokenization() -> None:
             {
                 "model": "qwen",
                 "messages": [],
-                "truncate_prompt_tokens": -1,
+                "truncate_prompt_tokens": wire_value,
             },
             context_length=65_536,
         )
