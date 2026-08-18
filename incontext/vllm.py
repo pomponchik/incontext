@@ -9,7 +9,8 @@ import re
 import threading
 import urllib.request
 from collections import OrderedDict
-from typing import Any, Callable, Dict, Optional, cast
+from collections.abc import Sequence
+from typing import Any, Callable, Dict, List, Optional, cast
 from urllib.parse import urlsplit
 
 from skelet import EnvSource, Field, Storage
@@ -199,8 +200,9 @@ class VllmBackend(Backend):
             "messages": VllmBackend._normalize_messages(messages),
         }
         tools = extra_body.get("tools", request.get("tools"))
-        if isinstance(tools, list):
-            payload["tools"] = tools
+        normalized_tools = VllmBackend._normalize_tools(tools)
+        if normalized_tools is not None:
+            payload["tools"] = normalized_tools
         prompt_options = (
             "add_generation_prompt",
             "continue_final_message",
@@ -237,6 +239,16 @@ class VllmBackend(Backend):
                 payload["chat_template_kwargs"] = merged_template_kwargs
         payload.setdefault("add_generation_prompt", True)
         return payload
+
+    @staticmethod
+    def _normalize_tools(tools: Any) -> Optional[List[Any]]:
+        """Materialize reusable OpenAI tool sequences for JSON tokenization."""
+
+        if isinstance(tools, list):
+            return tools
+        if isinstance(tools, Sequence) and not isinstance(tools, (str, bytes)):
+            return list(tools)
+        return None
 
     @staticmethod
     def _normalize_messages(messages: Any) -> Any:

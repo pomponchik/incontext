@@ -156,6 +156,38 @@ def test_build_payload_includes_tools_and_template_kwargs() -> None:
     assert payload["chat_template_kwargs"] == {"enable_thinking": True}
 
 
+def test_build_payload_materializes_tuple_tools_like_openai_sdk() -> None:
+    """Tokenize tool schemas accepted through OpenAI's Iterable API surface.
+
+    The official client accepts ``tools`` as an iterable and converts a tuple
+    to a JSON array before sending generation.  Dropping that same reusable
+    sequence from ``/tokenize`` removes model-visible definitions from the
+    rendered prompt and undercounts it.  Materialization must not mutate the
+    caller-owned tuple that Hermes can reuse for retries.
+    """
+
+    tools = (
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {"type": "object"},
+            },
+        },
+    )
+
+    payload = VllmBackend._build_payload(
+        {
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "use the tool"}],
+            "tools": tools,
+        },
+    )
+
+    assert payload["tools"] == list(tools)
+    assert isinstance(payload["tools"], list)
+
+
 def test_build_payload_mirrors_every_prompt_affecting_vllm_option() -> None:
     """Tokenize exactly the chat prompt that vLLM will use for generation.
 
