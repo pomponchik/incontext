@@ -18,6 +18,7 @@ def reset_skelet_environment_caches() -> None:
 @pytest.fixture
 def runtime_settings() -> Settings:
     return Settings(
+        model_name="qwen",
         context_length=65_536,
         compression_window=55_705,
         fallback_margin_tokens=1024,

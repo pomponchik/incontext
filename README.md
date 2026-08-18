@@ -22,8 +22,16 @@ The plugin reads the effective compression window from the installed Hermes
 provider-visible prompt, and applies:
 
 ```text
-max_tokens = max(1, compression_window - prompt_tokens)
+max_tokens = compression_window - prompt_tokens
 ```
+
+The expression is applied only while its result is positive. A zero or
+negative result is not converted to the invalid sentinel `max_tokens=1`.
+Instead, incontext installs the same exact counter into Hermes' pre-API
+compression estimator, so Hermes compacts the conversation before it creates
+the provider request. If the tokenizer is temporarily unavailable, this bridge
+falls back to Hermes' native rough estimator and the request middleware itself
+remains fail-open.
 
 This addresses the same output-budget arithmetic discussed in
 [NousResearch/hermes-agent#38652](https://github.com/NousResearch/hermes-agent/issues/38652).
@@ -172,9 +180,13 @@ settings object contains only the compression-window and fallback-budget policy.
   `chat_template_kwargs`; local tokenizer approximations are not used.
 - The returned `max_model_len` must equal Hermes' configured context length.
 - `max_tokens`, `max_completion_tokens`, and `max_output_tokens` are normalized
-  to one unambiguous `max_tokens` field.
+  to one unambiguous `max_tokens` field only when a positive output budget is
+  available; a full compression window is handed to preflight compression.
 - The incoming request is copied and never mutated.
 - Exact counts use a bounded, thread-safe cache.
+- The exact counter is also used by Hermes' preflight compressor, eliminating
+  the former gap where compression used a rough count but budgeting used an
+  exact one.
 - If `/tokenize` fails, Hermes' own rough estimator is used with an additional
   safety margin. If both counters fail, the middleware leaves the request
   unchanged instead of taking Hermes down.

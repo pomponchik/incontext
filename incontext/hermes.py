@@ -8,6 +8,7 @@ from typing import Any
 
 from .backend import backends
 from .budget import DynamicOutputBudget
+from .preflight import install as install_exact_preflight
 from .settings import Environment, load_settings
 
 LOGGER = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ def register(ctx: Any) -> None:
     """Register the plugin with a Hermes ``PluginContext``."""
 
     runtime = get_runtime()
+    install_exact_preflight(runtime)
     ctx.register_middleware("llm_request", apply_incontext)
     LOGGER.info(
         "incontext registered context=%d compression_window=%d",

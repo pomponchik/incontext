@@ -49,15 +49,15 @@ class Counter(Backend):
     [
         (64_000, 1_000, 0, 63_000),
         (64_000, 1_000, 1024, 61_976),
-        (64_000, 64_000, 0, 1),
-        (64_000, 70_000, 0, 1),
+        (64_000, 64_000, 0, None),
+        (64_000, 70_000, 0, None),
     ],
 )
 def test_compute_max_tokens_boundaries(
     window: int,
     prompt: int,
     margin: int,
-    expected: int,
+    expected: int | None,
 ) -> None:
     assert budget.compute_max_tokens(window, prompt, safety_margin=margin) == expected
 
@@ -87,8 +87,7 @@ def test_compute_max_tokens_rejects_invalid_inputs(
 )
 def test_compute_max_tokens_invariants(window: int, prompt: int, margin: int) -> None:
     result = budget.compute_max_tokens(window, prompt, safety_margin=margin)
-    assert result >= 1
-    assert result == max(1, window - prompt - margin)
+    assert result == (window - prompt - margin if window > prompt + margin else None)
 
 
 def install_estimator(monkeypatch: pytest.MonkeyPatch, value: Any) -> None:
@@ -188,6 +187,24 @@ def test_runtime_fallback_reserves_safety_margin(
     assert "secret failure" not in caplog.text
 
 
+@pytest.mark.parametrize("prompt_tokens", [55_705, 65_536])
+def test_runtime_does_not_inject_an_invalid_sentinel_for_full_window(
+    runtime_settings: Settings,
+    prompt_tokens: int,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(prompt_tokens))
+    request = {
+        "model": "qwen",
+        "messages": [{"role": "user", "content": "large prompt"}],
+        "max_tokens": 8192,
+    }
+    with caplog.at_level(logging.WARNING):
+        assert runtime(request=request) is None
+    assert request["max_tokens"] == 8192
+    assert "action=requires_compression" in caplog.text
+
+
 def test_runtime_normalizes_non_positive_fallback_estimate(
     runtime_settings: Settings,
 ) -> None:
@@ -240,4 +257,4 @@ def test_budget_never_increases_as_prompt_grows(small: int, growth: int) -> None
     window = 64_000
     small_cap = budget.compute_max_tokens(window, small)
     large_cap = budget.compute_max_tokens(window, small + growth)
-    assert large_cap <= small_cap
+    assert small_cap is None or large_cap is None or large_cap <= small_cap

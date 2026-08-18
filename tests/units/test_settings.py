@@ -214,6 +214,7 @@ def test_load_settings_uses_real_compressor_threshold() -> None:
     ModernCompressor.calls.clear()
     result = load()
     assert result == settings.Settings(
+        model_name="qwen-test",
         context_length=65_536,
         compression_window=55_705,
         fallback_margin_tokens=1024,

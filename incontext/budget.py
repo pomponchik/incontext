@@ -18,8 +18,13 @@ def compute_max_tokens(
     prompt_tokens: int,
     *,
     safety_margin: int = 0,
-) -> int:
-    """Return the positive free remainder of the compression window."""
+) -> int | None:
+    """Return free output space, or ``None`` when compression is required.
+
+    OpenAI-compatible APIs do not accept a zero-token completion.  Returning
+    ``1`` for an already-full compression window is therefore unsafe: it turns
+    a preflight condition into a request that the provider must reject.
+    """
 
     if compression_window <= 0:
         raise ValueError("compression_window must be positive")
@@ -27,7 +32,8 @@ def compute_max_tokens(
         raise ValueError("prompt_tokens must be positive")
     if safety_margin < 0:
         raise ValueError("safety_margin must not be negative")
-    return max(1, compression_window - prompt_tokens - safety_margin)
+    remaining = compression_window - prompt_tokens - safety_margin
+    return remaining if remaining > 0 else None
 
 
 def estimate_request_tokens_rough(request: dict[str, Any]) -> int:
@@ -116,6 +122,22 @@ class DynamicOutputBudget:
             prompt_tokens,
             safety_margin=safety_margin,
         )
+        if dynamic_max_tokens is None:
+            # The exact preflight installed during plugin registration sees
+            # this condition before Hermes builds the provider request and
+            # starts compression.  Keep this middleware fail-open as a second
+            # line of defence for requests from call sites that bypass that
+            # preflight: an invalid sentinel cap would otherwise cause Hermes
+            # to retry the same context error instead of compacting history.
+            LOGGER.warning(
+                "incontext model=%s source=%s prompt_tokens=%d "
+                "compression_window=%d action=requires_compression",
+                request.get("model") or "unknown",
+                source,
+                prompt_tokens,
+                self.settings.compression_window,
+            )
+            return None
         rewritten = dict(request)
         for key in OUTPUT_BUDGET_FIELDS:
             rewritten.pop(key, None)

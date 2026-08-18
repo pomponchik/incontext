@@ -57,11 +57,13 @@ class Settings:
     """Validated immutable runtime settings."""
 
     __slots__ = (
-        "context_length",
         "compression_window",
+        "context_length",
         "fallback_margin_tokens",
+        "model_name",
     )
 
+    model_name: str
     context_length: int
     compression_window: int
     fallback_margin_tokens: int
@@ -258,6 +260,7 @@ def load_settings(
         )
 
     return Settings(
+        model_name=model_name.strip(),
         context_length=context_length,
         compression_window=compression_window,
         fallback_margin_tokens=fallback_margin,

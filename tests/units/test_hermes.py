@@ -98,8 +98,14 @@ def test_register_validates_and_registers_middleware(
     runtime = mock.Mock()
     runtime.settings = runtime_settings
     context = Context()
-    with mock.patch.object(hermes, "get_runtime", return_value=runtime):
+    with mock.patch.object(
+        hermes, "get_runtime", return_value=runtime
+    ), mock.patch.object(
+        hermes,
+        "install_exact_preflight",
+    ) as install:
         hermes.register(context)
+    install.assert_called_once_with(runtime)
     assert context.calls == [("llm_request", hermes.apply_incontext)]
 
 
