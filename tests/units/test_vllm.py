@@ -69,6 +69,23 @@ def test_source_is_stable_and_non_sensitive() -> None:
     assert backend.source == "vllm-tokenize"
 
 
+def test_vllm_maps_responses_output_cap_to_chat_completions() -> None:
+    """Avoid a silently ignored output budget on vLLM's chat endpoint.
+
+    ``max_output_tokens`` belongs to the Responses API and the deployed vLLM
+    Chat Completions request model ignores it.  The bundled backend therefore
+    translates only that incompatible alias and preserves aliases that the
+    endpoint already understands.
+    """
+
+    backend, _ = make_backend()
+
+    assert backend.output_budget_field("max_output_tokens") == "max_tokens"
+    assert backend.output_budget_field("max_completion_tokens") == (
+        "max_completion_tokens"
+    )
+
+
 def test_default_user_agent_tracks_distribution_version() -> None:
     """Keep the tokenizer transport identity aligned with package metadata.
 

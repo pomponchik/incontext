@@ -35,6 +35,11 @@ class Backend(ABC):
 
         raise NotImplementedError
 
+    def output_budget_field(self, requested_field: str) -> str:
+        """Return the provider-supported wire alias for an output budget."""
+
+        return requested_field
+
 
 @slot(
     entrypoint_group="incontext.backends",

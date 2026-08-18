@@ -92,6 +92,13 @@ class VllmBackend(Backend):
 
         return "vllm-tokenize"
 
+    def output_budget_field(self, requested_field: str) -> str:
+        """Map Responses-only output caps to vLLM Chat Completions fields."""
+
+        return (
+            "max_tokens" if requested_field == "max_output_tokens" else requested_field
+        )
+
     def count(
         self,
         request: Dict[str, Any],

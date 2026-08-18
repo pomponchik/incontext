@@ -35,6 +35,19 @@ def test_backend_contract_is_abstract() -> None:
         Backend()  # type: ignore[abstract]
 
 
+def test_backend_preserves_output_budget_alias_by_default() -> None:
+    """Keep third-party backend behavior unchanged after extending the API.
+
+    Existing plugins inherit the neutral implementation, so provider-selected
+    fields remain untouched unless a backend explicitly documents a wire-level
+    incompatibility such as vLLM Chat Completions' ignored Responses alias.
+    """
+
+    assert ReplacementBackend().output_budget_field("max_output_tokens") == (
+        "max_output_tokens"
+    )
+
+
 def test_public_type_hints_resolve_on_every_supported_python() -> None:
     """Keep public annotations introspectable down to the Python 3.8 floor.
 

@@ -255,6 +255,46 @@ def test_runtime_preserves_the_provider_selected_output_field(field: str) -> Non
     )
 
 
+def test_runtime_uses_backend_supported_output_budget_field() -> None:
+    """Let an inference backend correct an incompatible provider wire alias.
+
+    Hermes can pass a Responses-style ``max_output_tokens`` cap to a custom
+    Chat Completions route.  The numeric cap remains authoritative, but a
+    backend that knows its server ignores that name must be able to emit the
+    equivalent accepted field without leaking server-specific rules into the
+    generic dynamic-budget middleware.
+    """
+
+    class ChatCompletionsCounter(Counter):
+        def output_budget_field(self, requested_field: str) -> str:
+            return (
+                "max_tokens"
+                if requested_field == "max_output_tokens"
+                else requested_field
+            )
+
+    runtime_settings = Settings(
+        model_name="qwen",
+        context_length=65_536,
+        compression_window=55_705,
+        fallback_margin_tokens=1024,
+        provider="",
+        base_url="",
+    )
+    runtime = budget.DynamicOutputBudget(
+        runtime_settings,
+        ChatCompletionsCounter(50_000),
+    )
+
+    result = runtime(
+        request={"model": "qwen", "messages": [], "max_output_tokens": 8192},
+    )
+
+    assert result is not None
+    assert result["request"]["max_tokens"] == 5705
+    assert "max_output_tokens" not in result["request"]
+
+
 def test_runtime_removes_extra_body_output_cap_override() -> None:
     """Prevent OpenAI's ``extra_body`` merge from undoing the dynamic budget.
 

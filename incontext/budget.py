@@ -183,6 +183,7 @@ class DynamicOutputBudget:
         if requested_output_cap is not None:
             output_field, requested_cap = requested_output_cap
             dynamic_max_tokens = min(dynamic_max_tokens, requested_cap)
+        output_field = self.backend.output_budget_field(output_field)
         rewritten = dict(request)
         for key in OUTPUT_BUDGET_FIELDS:
             rewritten.pop(key, None)
