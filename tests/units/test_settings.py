@@ -797,6 +797,73 @@ def test_load_settings_reserves_provider_output_budget() -> None:
     assert ModernCompressor.calls[-1]["max_tokens"] == 2048
 
 
+def test_load_settings_reserves_provider_max_tokens_alias() -> None:
+    """Honor both output-cap names accepted by Hermes provider resolution.
+
+    Hermes lifts ``providers.<name>.max_tokens`` into the runtime completion
+    allowance used by gateway-created agents.  Ignoring that supported alias
+    gives incontext a larger fictitious compression window than the active
+    compressor for the same named provider.
+    """
+
+    ModernCompressor.calls.clear()
+    config = {
+        **base_config,
+        "model": {
+            "default": "qwen-test",
+            "provider": "custom:local",
+            "context_length": 65_536,
+        },
+        "providers": {
+            "local": {
+                "api": "https://inference.example/v1",
+                "default_model": "qwen-test",
+                "max_tokens": 2048,
+            },
+        },
+    }
+
+    load(config=config)
+
+    assert ModernCompressor.calls[-1]["max_tokens"] == 2048
+
+
+def test_blank_hermes_max_tokens_falls_back_to_model_configuration() -> None:
+    """Treat an empty Hermes environment override as absent.
+
+    Hermes checks ``HERMES_MAX_TOKENS`` for a non-empty value before parsing;
+    a conventional blank dotenv assignment therefore falls through to
+    ``model.max_tokens``.  Native skelet conversion and validation must mirror
+    that behavior instead of failing plugin registration.
+    """
+
+    ModernCompressor.calls.clear()
+    config = {
+        **base_config,
+        "model": {**base_config["model"], "max_tokens": 4096},
+    }
+
+    load(environment={"HERMES_MAX_TOKENS": ""}, config=config)
+
+    assert ModernCompressor.calls[-1]["max_tokens"] == 4096
+
+
+def test_invalid_hermes_max_tokens_fails_native_environment_validation() -> None:
+    """Reject a non-integer Hermes override through skelet's field contract.
+
+    The optional environment value is parsed by the same declarative skelet
+    field that trims blank assignments.  A non-empty malformed value must not
+    leak a raw conversion exception or silently fall through to YAML because
+    Hermes itself would be unable to construct a matching token allowance.
+    """
+
+    with pytest.raises(
+        settings.SettingsError,
+        match="max_tokens must be a positive integer or blank",
+    ):
+        load(environment={"HERMES_MAX_TOKENS": "invalid"})
+
+
 @pytest.mark.parametrize("value", [True, 0, -1, "invalid"])
 def test_load_settings_rejects_invalid_hermes_output_budget(value: Any) -> None:
     """Reject malformed output reserves before deriving a false window.

@@ -15,6 +15,17 @@ class SettingsError(RuntimeError):
     """Raised when incontext cannot derive a safe runtime configuration."""
 
 
+def _optional_positive_integer_text(value: str) -> bool:
+    """Validate an optional integer environment value after whitespace removal."""
+
+    if not value:
+        return True
+    try:
+        return int(value) > 0
+    except ValueError:
+        return False
+
+
 class Environment(
     Storage,
     sources=cast(
@@ -58,12 +69,14 @@ class HermesEnvironment(
 ):
     """Hermes-owned environment overrides that affect compression policy."""
 
-    max_tokens: int = Field(
-        0,
+    max_tokens: str = Field(
+        "",
+        conversion=lambda value: value.strip(),
         validation={
-            "max_tokens must be positive": lambda value: value > 0,
+            "max_tokens must be a positive integer or blank": (
+                _optional_positive_integer_text
+            ),
         },
-        validate_default=False,
         read_only=True,
     )
 
@@ -356,12 +369,14 @@ def _effective_max_tokens(
 ) -> Optional[int]:
     """Resolve Hermes' output allowance in the same precedence order."""
 
-    if environment.max_tokens > 0:
-        return environment.max_tokens
+    if environment.max_tokens:
+        return int(environment.max_tokens)
     configured = model.get("max_tokens")
     if configured is not None:
         return _strict_int(configured, "Hermes model.max_tokens", minimum=1)
     provider_configured = provider_config.get("max_output_tokens")
+    if provider_configured is None:
+        provider_configured = provider_config.get("max_tokens")
     if provider_configured is not None:
         return _strict_int(
             provider_configured,
