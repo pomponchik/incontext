@@ -247,7 +247,7 @@ def _effective_compression_threshold(
         from agent.agent_init import (  # type: ignore[import-not-found]  # noqa: PLC0415
             _resolve_compression_threshold,
         )
-        from agent.auxiliary_client import (  # type: ignore[import-not-found]  # noqa: PLC0415
+        from agent.auxiliary_client import (  # noqa: PLC0415
             _is_codex_gpt54_or_gpt55,
             _is_codex_spark,
         )
