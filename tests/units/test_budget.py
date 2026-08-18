@@ -254,6 +254,41 @@ def test_runtime_removes_extra_body_output_cap_override() -> None:
     }
 
 
+def test_nested_smaller_cap_preserves_top_level_provider_field() -> None:
+    """Honor a nested bound without changing Hermes' selected wire parameter.
+
+    Hermes may choose ``max_completion_tokens`` for a model that rejects the
+    legacy alias.  A smaller ``max_tokens`` left in ``extra_body`` still limits
+    the numeric budget because OpenAI clients merge it onto the wire request,
+    but removing that override must emit the minimum through the existing
+    top-level provider field rather than reintroducing the rejected alias.
+    """
+
+    runtime_settings = Settings(
+        model_name="gpt-5-test",
+        context_length=1000,
+        compression_window=800,
+        fallback_margin_tokens=10,
+        provider="",
+        base_url="",
+    )
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(100))
+
+    result = runtime(
+        request={
+            "model": "gpt-5-test",
+            "messages": [],
+            "max_completion_tokens": 600,
+            "extra_body": {"max_tokens": 200},
+        },
+    )
+
+    assert result is not None
+    assert result["request"]["max_completion_tokens"] == 200
+    assert "max_tokens" not in result["request"]
+    assert result["request"]["extra_body"] == {}
+
+
 def test_runtime_rejects_extra_body_model_override(
     runtime_settings: Settings,
 ) -> None:

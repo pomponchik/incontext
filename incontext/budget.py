@@ -38,21 +38,32 @@ def compute_max_tokens(
 def _requested_output_cap(
     request: Dict[str, Any],
 ) -> Optional[Tuple[str, int]]:
-    """Return the field and smallest valid cap requested by the caller."""
+    """Return the provider field and smallest valid caller cap."""
 
     extra_body = request.get("extra_body")
-    sources = [request]
-    if isinstance(extra_body, dict):
-        sources.append(extra_body)
-    caps = [
+    top_level_caps = [
         (field, value)
-        for source in sources
         for field in OUTPUT_BUDGET_FIELDS
-        if not isinstance((value := source.get(field)), bool)
+        if not isinstance((value := request.get(field)), bool)
         and isinstance(value, int)
         and value > 0
     ]
-    return min(caps, key=lambda item: item[1]) if caps else None
+    nested_caps = (
+        [
+            (field, value)
+            for field in OUTPUT_BUDGET_FIELDS
+            if not isinstance((value := extra_body.get(field)), bool)
+            and isinstance(value, int)
+            and value > 0
+        ]
+        if isinstance(extra_body, dict)
+        else []
+    )
+    caps = [*top_level_caps, *nested_caps]
+    if not caps:
+        return None
+    preferred = min(top_level_caps or nested_caps, key=lambda item: item[1])[0]
+    return preferred, min(value for _, value in caps)
 
 
 def estimate_request_tokens_rough(request: Dict[str, Any]) -> int:
