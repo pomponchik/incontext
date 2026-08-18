@@ -316,6 +316,17 @@ def _custom_provider_aliases(display_name: Any, provider_key: Any) -> Set[str]:
     return aliases
 
 
+def _provider_enabled(configured: Mapping[str, Any]) -> bool:
+    """Interpret Hermes' enabled flag for a modern provider entry."""
+
+    flag = configured.get("enabled", True)
+    if isinstance(flag, bool):
+        return flag
+    if isinstance(flag, str):
+        return flag.strip().lower() not in {"false", "0", "no", "off"}
+    return bool(flag)
+
+
 def _named_provider_config(
     providers: Mapping[str, Any],
     selector: str,
@@ -333,6 +344,8 @@ def _named_provider_config(
             continue
         if not isinstance(configured, Mapping):
             raise SettingsError("Hermes providers entry must be a mapping")
+        if not _provider_enabled(configured):
+            continue
         return configured
     return None
 

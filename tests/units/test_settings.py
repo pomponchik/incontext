@@ -474,6 +474,45 @@ def test_prefixed_custom_identity_resolves_in_both_provider_schemas(
     assert "" not in settings._custom_provider_aliases("custom:", "")
 
 
+@pytest.mark.parametrize("disabled", [False, "off", 0])
+def test_disabled_modern_provider_falls_through_to_legacy_entry(
+    disabled: Any,
+) -> None:
+    """Follow Hermes when a modern provider entry is explicitly disabled.
+
+    Hermes excludes disabled ``providers`` records from route resolution and
+    can still resolve a same-name legacy entry.  Selecting the disabled record
+    first gives incontext a different endpoint from the running agent and
+    silently disables exact budgeting on the valid legacy route.  Boolean,
+    string, and truth-value forms must follow Hermes' compatibility parser.
+    """
+
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": "custom:edge",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            "providers": {
+                "edge": {
+                    "enabled": disabled,
+                    "api": "https://disabled.example/v1",
+                },
+            },
+            "custom_providers": [
+                {
+                    "name": "Edge",
+                    "base_url": "https://live.example/v1",
+                },
+            ],
+        },
+    )
+
+    assert result.base_url == "https://live.example/v1"
+
+
 def test_legacy_custom_provider_lookup_returns_none_without_a_match() -> None:
     """Do not attach an unrelated persisted endpoint to the primary route.
 
