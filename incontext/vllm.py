@@ -38,7 +38,7 @@ class VllmEnvironment(
         read_only=True,
     )
     tokenizer_user_agent: str = Field(
-        "incontext/0.0.1",
+        "incontext/0.0.2",
         conversion=lambda value: value.strip(),
         validation={
             "tokenizer_user_agent must not be blank": lambda value: bool(value),

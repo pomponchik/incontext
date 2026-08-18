@@ -5,6 +5,7 @@ import json
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
+from importlib.metadata import version
 from typing import Any
 from unittest.mock import patch
 
@@ -65,6 +66,25 @@ def make_backend(
 def test_source_is_stable_and_non_sensitive() -> None:
     backend, _ = make_backend()
     assert backend.source == "vllm-tokenize"
+
+
+def test_default_user_agent_tracks_distribution_version() -> None:
+    """Keep the tokenizer transport identity aligned with package metadata.
+
+    Tokenizer-server logs, operational metrics, and proxy policies consume the
+    default User-Agent.  Comparing it with installed distribution metadata
+    prevents a copied version literal from silently identifying a newer client
+    as an older release after future version bumps.
+    """
+
+    with patch.dict(
+        "os.environ",
+        {"INCONTEXT_TOKENIZER_URL": "https://inference.test/tokenize"},
+        clear=True,
+    ):
+        environment = VllmEnvironment()
+
+    assert environment.tokenizer_user_agent == f"incontext/{version('incontext')}"
 
 
 def test_build_payload_minimal_shape() -> None:
