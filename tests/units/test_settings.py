@@ -241,6 +241,8 @@ def test_load_settings_uses_real_compressor_threshold() -> None:
         context_length=65_536,
         compression_window=55_705,
         fallback_margin_tokens=1024,
+        provider="custom",
+        base_url="https://inference.example/v1",
     )
     call = ModernCompressor.calls[-1]
     assert call["model"] == "qwen-test"

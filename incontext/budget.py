@@ -96,7 +96,7 @@ class DynamicOutputBudget:
         self,
         *,
         request: dict[str, Any],
-        **_: Any,
+        **context: Any,
     ) -> dict[str, Any] | None:
         """Rewrite output-cap aliases into one exact dynamic ``max_tokens``."""
 
@@ -105,7 +105,7 @@ class DynamicOutputBudget:
             list,
         ):
             return None
-        if request.get("model") != self.settings.model_name:
+        if not self._matches_route(request, context):
             return None
 
         source = self.backend.source
@@ -191,3 +191,24 @@ class DynamicOutputBudget:
                 f"prompt_tokens={prompt_tokens}, max_tokens={dynamic_max_tokens}"
             ),
         }
+
+    def _matches_route(
+        self,
+        request: dict[str, Any],
+        context: dict[str, Any],
+    ) -> bool:
+        if request.get("model") != self.settings.model_name:
+            return False
+        provider = context.get("provider")
+        if (
+            self.settings.provider
+            and isinstance(provider, str)
+            and provider.strip() != self.settings.provider
+        ):
+            return False
+        base_url = context.get("base_url")
+        return not (
+            self.settings.base_url
+            and isinstance(base_url, str)
+            and base_url.strip().rstrip("/") != self.settings.base_url
+        )

@@ -39,6 +39,8 @@ def runtime(counter: Counter) -> DynamicOutputBudget:
             context_length=65_536,
             compression_window=64_000,
             fallback_margin_tokens=1024,
+            provider="",
+            base_url="",
         ),
         counter,
     )
@@ -246,6 +248,51 @@ def test_auxiliary_wrapper_ignores_a_different_fallback_model() -> None:
 
     assert result == {
         "model": "fallback-model",
+        "messages": [{"role": "user", "content": "retry"}],
+    }
+    assert counter.requests == []
+
+
+def test_auxiliary_wrapper_ignores_same_model_on_another_route() -> None:
+    """Distinguish a fallback endpoint even when it reuses the model alias.
+
+    Hermes fallback destinations carry provider and base URL independently of
+    the model name.  Tokenizing ``shared-model`` on the primary local vLLM is
+    still wrong when the request is headed to an external provider that happens
+    to expose the same alias.
+    """
+
+    counter = Counter(12_345)
+    scoped_runtime = DynamicOutputBudget(
+        Settings(
+            model_name="qwen-test",
+            context_length=65_536,
+            compression_window=64_000,
+            fallback_margin_tokens=1024,
+            provider="custom",
+            base_url="https://primary.invalid/v1",
+        ),
+        counter,
+    )
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        base_url: str | None = None,
+    ) -> dict[str, Any]:
+        del provider, base_url
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(scoped_runtime, build)(
+        "openai",
+        "qwen-test",
+        [{"role": "user", "content": "retry"}],
+        base_url="https://fallback.invalid/v1",
+    )
+
+    assert result == {
+        "model": "qwen-test",
         "messages": [{"role": "user", "content": "retry"}],
     }
     assert counter.requests == []

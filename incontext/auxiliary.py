@@ -32,6 +32,18 @@ class _AuxiliaryBudget:
         model = self._argument(bound.arguments, "model")
         if model != self.runtime.settings.model_name:
             return original_request
+        provider = self._argument(bound.arguments, "provider")
+        if (
+            self.runtime.settings.provider
+            and provider != self.runtime.settings.provider
+        ):
+            return original_request
+        base_url = self._argument(bound.arguments, "base_url")
+        if self.runtime.settings.base_url and (
+            not isinstance(base_url, str)
+            or base_url.strip().rstrip("/") != self.runtime.settings.base_url
+        ):
+            return original_request
         max_tokens = self._argument(bound.arguments, "max_tokens")
         request = original_request
         has_output_cap = any(

@@ -192,6 +192,8 @@ def test_runtime_preserves_the_provider_selected_output_field(field: str) -> Non
         context_length=65_536,
         compression_window=55_705,
         fallback_margin_tokens=1024,
+        provider="",
+        base_url="",
     )
     runtime = budget.DynamicOutputBudget(runtime_settings, Counter(50_000))
 
@@ -224,6 +226,8 @@ def test_runtime_removes_extra_body_output_cap_override() -> None:
         context_length=1000,
         compression_window=800,
         fallback_margin_tokens=10,
+        provider="",
+        base_url="",
     )
     runtime = budget.DynamicOutputBudget(runtime_settings, Counter(100))
     request = {
@@ -283,6 +287,8 @@ def test_existing_output_cap_is_never_increased(
         context_length=65_536,
         compression_window=55_705,
         fallback_margin_tokens=1024,
+        provider="",
+        base_url="",
     )
     prompt_tokens = runtime_settings.compression_window - free_space
     runtime = budget.DynamicOutputBudget(
@@ -406,6 +412,40 @@ def test_runtime_ignores_request_for_a_different_model(
     )
 
     assert result is None
+    assert counter.requests == []
+
+
+def test_runtime_ignores_same_model_on_a_different_provider_route() -> None:
+    """Fail open when middleware context identifies a different endpoint.
+
+    A session fallback may retain the same model alias while changing provider
+    or base URL.  Hermes supplies both values to ``llm_request`` middleware, so
+    incontext must not apply the primary vLLM tokenizer merely because the JSON
+    model string still matches.
+    """
+
+    counter = Counter(100)
+    runtime = budget.DynamicOutputBudget(
+        Settings(
+            model_name="shared-model",
+            context_length=1000,
+            compression_window=800,
+            fallback_margin_tokens=10,
+            provider="custom",
+            base_url="https://primary.invalid/v1",
+        ),
+        counter,
+    )
+    request = {"model": "shared-model", "messages": []}
+
+    assert (
+        runtime(
+            request=request,
+            provider="openai",
+            base_url="https://fallback.invalid/v1",
+        )
+        is None
+    )
     assert counter.requests == []
 
 

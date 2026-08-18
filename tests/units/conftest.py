@@ -22,4 +22,6 @@ def runtime_settings() -> Settings:
         context_length=65_536,
         compression_window=55_705,
         fallback_margin_tokens=1024,
+        provider="",
+        base_url="",
     )

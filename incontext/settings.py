@@ -57,16 +57,20 @@ class Settings:
     """Validated immutable runtime settings."""
 
     __slots__ = (
+        "base_url",
         "compression_window",
         "context_length",
         "fallback_margin_tokens",
         "model_name",
+        "provider",
     )
 
     model_name: str
     context_length: int
     compression_window: int
     fallback_margin_tokens: int
+    provider: str
+    base_url: str
 
 
 def _strict_int(
@@ -201,6 +205,8 @@ def load_settings(
         "Hermes model.context_length",
         minimum=1,
     )
+    provider = str(model.get("provider") or "").strip()
+    base_url = str(model.get("base_url") or "").strip().rstrip("/")
     configured_max_tokens = model.get("max_tokens")
     max_tokens = (
         None
@@ -276,4 +282,6 @@ def load_settings(
         context_length=context_length,
         compression_window=compression_window,
         fallback_margin_tokens=fallback_margin,
+        provider=provider,
+        base_url=base_url,
     )
