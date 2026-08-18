@@ -181,13 +181,8 @@ def _effective_compression_threshold(
     """Reuse Hermes' installed model-specific threshold policy when available."""
 
     try:
-        from agent.agent_init import (  # type: ignore[import-not-found]  # noqa: PLC0415
-            _resolve_compression_threshold,
-        )
         from agent.auxiliary_client import (  # type: ignore[import-not-found]  # noqa: PLC0415
             _compression_threshold_for_model,
-            _is_codex_gpt54_or_gpt55,
-            _is_codex_spark,
         )
     except (ImportError, AttributeError):
         return configured
@@ -201,19 +196,36 @@ def _effective_compression_threshold(
             provider,
             allow_codex_gpt55_autoraise=allow_codex_autoraise,
         )
-        effective, _ = _resolve_compression_threshold(
-            configured,
-            model_threshold,
-            model=model,
-            is_codex_autoraise=(
-                _is_codex_gpt54_or_gpt55(model, provider)
-                or _is_codex_spark(model, provider)
-            ),
-        )
     except Exception:  # noqa: BLE001
-        # Hermes itself treats model-policy lookup as best effort and keeps the
-        # configured global threshold if those private helpers fail.
         return configured
+
+    try:
+        from agent.agent_init import (  # type: ignore[import-not-found]  # noqa: PLC0415
+            _resolve_compression_threshold,
+        )
+        from agent.auxiliary_client import (  # type: ignore[import-not-found]  # noqa: PLC0415
+            _is_codex_gpt54_or_gpt55,
+            _is_codex_spark,
+        )
+    except (ImportError, AttributeError):
+        # Hermes 2026.7.1 applied the model override directly, before the
+        # shared resolver and expanded Codex classifiers were introduced.
+        effective = configured if model_threshold is None else model_threshold
+    else:
+        try:
+            effective, _ = _resolve_compression_threshold(
+                configured,
+                model_threshold,
+                model=model,
+                is_codex_autoraise=(
+                    _is_codex_gpt54_or_gpt55(model, provider)
+                    or _is_codex_spark(model, provider)
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            # Hermes itself treats model-policy lookup as best effort and keeps the
+            # configured global threshold if those private helpers fail.
+            return configured
     return _strict_float(
         effective,
         "Hermes effective compression threshold",

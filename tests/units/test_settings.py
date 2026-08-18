@@ -379,8 +379,58 @@ def test_effective_threshold_delegates_to_installed_hermes_policy(
     ]
 
 
+@pytest.mark.parametrize(
+    ("model_override", "expected"),
+    [(0.85, 0.85), (None, 0.5)],
+)
+def test_effective_threshold_uses_legacy_hermes_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    model_override: float | None,
+    expected: float,
+) -> None:
+    """Mirror the threshold contract exposed by Hermes 2026.7.1.
+
+    That release already supplied its model-specific threshold function but
+    predates the shared resolver and expanded Codex/Spark classifiers.  The
+    returned override must therefore replace the global value directly, while
+    a ``None`` result retains the configured threshold, so incontext and the
+    installed compressor always derive the same boundary.
+    """
+
+    agent = types.ModuleType("agent")
+    agent.__path__ = []  # type: ignore[attr-defined]
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+    calls: list[tuple[Any, ...]] = []
+
+    def model_threshold(
+        model: str,
+        provider: str,
+        *,
+        allow_codex_gpt55_autoraise: bool,
+    ) -> float | None:
+        calls.append((model, provider, allow_codex_gpt55_autoraise))
+        return model_override
+
+    auxiliary._compression_threshold_for_model = model_threshold  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.delitem(sys.modules, "agent.agent_init", raising=False)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+
+    result = settings._effective_compression_threshold(
+        0.5,
+        model="gpt-5.5",
+        provider="openai-codex",
+        compression={"codex_gpt55_autoraise": True},
+    )
+
+    assert result == expected
+    assert calls == [("gpt-5.5", "openai-codex", True)]
+
+
+@pytest.mark.parametrize("failure_stage", ["threshold", "resolver"])
 def test_effective_threshold_falls_back_when_hermes_policy_fails(
     monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
 ) -> None:
     """Match Hermes' best-effort behavior for private policy failures.
 
@@ -394,13 +444,18 @@ def test_effective_threshold_falls_back_when_hermes_policy_fails(
     agent_init = types.ModuleType("agent.agent_init")
     auxiliary = types.ModuleType("agent.auxiliary_client")
 
-    def broken_policy(*args: Any, **kwargs: Any) -> float:
-        raise RuntimeError("policy unavailable")
+    def model_policy(*args: Any, **kwargs: Any) -> float:
+        if failure_stage == "threshold":
+            raise RuntimeError("policy unavailable")
+        return 0.9
 
-    agent_init._resolve_compression_threshold = (  # type: ignore[attr-defined]
-        lambda *args, **kwargs: (0.9, None)
-    )
-    auxiliary._compression_threshold_for_model = broken_policy  # type: ignore[attr-defined]
+    def resolver(*args: Any, **kwargs: Any) -> tuple[float, None]:
+        if failure_stage == "resolver":
+            raise RuntimeError("resolver unavailable")
+        return 0.9, None
+
+    agent_init._resolve_compression_threshold = resolver  # type: ignore[attr-defined]
+    auxiliary._compression_threshold_for_model = model_policy  # type: ignore[attr-defined]
     auxiliary._is_codex_gpt54_or_gpt55 = (  # type: ignore[attr-defined]
         lambda model, provider: False
     )
