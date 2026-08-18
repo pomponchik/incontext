@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .auxiliary import install as install_auxiliary_budget
 from .backend import backends
@@ -53,11 +53,22 @@ def get_active_runtime() -> Optional[DynamicOutputBudget]:
         return runtime
 
 
-def _activate_profile(key: str) -> None:
-    """Record one plugin-manager owner for a Hermes profile."""
+def _activate_profile(key: str) -> Callable[[], None]:
+    """Record one profile owner and return its idempotent release callback."""
 
     with _runtime_lock:
         _active_profiles[key] = _active_profiles.get(key, 0) + 1
+
+    closed = False
+
+    def cleanup() -> None:
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        _deactivate_profile(key)
+
+    return cleanup
 
 
 def _deactivate_profile(key: str) -> None:
@@ -102,17 +113,25 @@ def register(ctx: Any) -> None:
 
     key = _runtime_key()
     runtime = get_runtime()
-    _activate_profile(key)
-    preflight_cleanup = install_exact_preflight(get_active_runtime)
-    auxiliary_cleanup = install_auxiliary_budget(get_active_runtime)
-    on_unload = getattr(ctx, "on_unload", None)
-    if callable(on_unload):
+    profile_cleanup = _activate_profile(key)
+    cleanups: List[Callable[[], None]] = [profile_cleanup]
+    try:
+        preflight_cleanup = install_exact_preflight(get_active_runtime)
         if preflight_cleanup is not None:
-            on_unload(preflight_cleanup)
+            cleanups.append(preflight_cleanup)
+        auxiliary_cleanup = install_auxiliary_budget(get_active_runtime)
         if auxiliary_cleanup is not None:
-            on_unload(auxiliary_cleanup)
-        on_unload(lambda: _deactivate_profile(key))
-    ctx.register_middleware("llm_request", apply_incontext)
+            cleanups.append(auxiliary_cleanup)
+        ctx.register_middleware("llm_request", apply_incontext)
+        on_unload = getattr(ctx, "on_unload", None)
+        if callable(on_unload):
+            for cleanup in cleanups[1:]:
+                on_unload(cleanup)
+            on_unload(profile_cleanup)
+    except Exception:
+        for cleanup in reversed(cleanups):
+            cleanup()
+        raise
     LOGGER.info(
         "incontext registered context=%d compression_window=%d",
         runtime.settings.context_length,

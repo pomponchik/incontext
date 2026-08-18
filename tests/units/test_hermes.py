@@ -194,6 +194,8 @@ def test_profile_unload_invalidates_its_cached_runtime() -> None:
             callback()
 
         assert hermes.get_active_runtime() is None
+        for callback in reversed(first_context.unload_callbacks):
+            callback()
         hermes.register(second_context)
         assert hermes.get_active_runtime() is second
 
@@ -369,6 +371,94 @@ def test_register_skips_missing_cleanup_callbacks(
         hermes.register(context)
 
     assert len(context.unload_callbacks) == 1
+
+
+def test_register_rolls_back_when_auxiliary_installation_fails(
+    runtime_settings: Settings,
+) -> None:
+    """Undo partial global setup when a later integration cannot install.
+
+    Registration activates the profile before patching both private Hermes
+    call paths.  If the auxiliary patch raises after preflight succeeds, the
+    preflight wrapper and profile runtime must be released immediately because
+    Hermes never receives unload callbacks for a plugin whose registration
+    failed.
+    """
+
+    runtime = mock.Mock()
+    runtime.settings = runtime_settings
+    preflight_cleanup = mock.Mock()
+    context = Context()
+    with mock.patch.object(
+        hermes,
+        "_runtime_key",
+        return_value="profile-a",
+    ), mock.patch.object(
+        hermes,
+        "get_runtime",
+        return_value=runtime,
+    ), mock.patch.object(
+        hermes,
+        "install_exact_preflight",
+        return_value=preflight_cleanup,
+    ), mock.patch.object(
+        hermes,
+        "install_auxiliary_budget",
+        side_effect=RuntimeError("install failed"),
+    ), pytest.raises(RuntimeError, match="install failed"):
+        hermes.register(context)
+
+    preflight_cleanup.assert_called_once_with()
+    assert hermes._active_profiles == {}
+    assert hermes._runtimes == {}
+    assert context.calls == []
+    assert context.unload_callbacks == []
+
+
+def test_register_rolls_back_all_integrations_when_middleware_rejects(
+    runtime_settings: Settings,
+) -> None:
+    """Release every acquired owner if public middleware registration fails.
+
+    A custom or future Hermes ``PluginContext`` can reject a middleware after
+    both private wrappers have been installed.  Rollback must run in reverse
+    acquisition order and remain independent of the absent unload ledger so no
+    process-wide patch continues handling requests for a disabled profile.
+    """
+
+    events: list[str] = []
+
+    class RejectingContext(Context):
+        def register_middleware(self, kind: str, callback: Any) -> None:
+            del kind, callback
+            raise ValueError("middleware rejected")
+
+    runtime = mock.Mock()
+    runtime.settings = runtime_settings
+    context = RejectingContext()
+    with mock.patch.object(
+        hermes,
+        "_runtime_key",
+        return_value="profile-a",
+    ), mock.patch.object(
+        hermes,
+        "get_runtime",
+        return_value=runtime,
+    ), mock.patch.object(
+        hermes,
+        "install_exact_preflight",
+        return_value=lambda: events.append("preflight"),
+    ), mock.patch.object(
+        hermes,
+        "install_auxiliary_budget",
+        return_value=lambda: events.append("auxiliary"),
+    ), pytest.raises(ValueError, match="middleware rejected"):
+        hermes.register(context)
+
+    assert events == ["auxiliary", "preflight"]
+    assert hermes._active_profiles == {}
+    assert hermes._runtimes == {}
+    assert context.unload_callbacks == []
 
 
 def test_reset_runtime_removes_cached_value() -> None:
