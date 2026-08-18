@@ -111,9 +111,13 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
         get_plugin_manager,
     )
 
-    from incontext.hermes import get_runtime  # noqa: PLC0415
+    from incontext.hermes import _reset_runtime_for_tests, get_runtime  # noqa: PLC0415
     from incontext.vllm import VllmBackend  # noqa: PLC0415
 
+    # Container images may preload plugins from sitecustomize or pytest entry
+    # points before this test installs its isolated Hermes home. Reset only the
+    # package cache so discovery validates the fixture configuration itself.
+    _reset_runtime_for_tests()
     manager = get_plugin_manager()
     manager.discover_and_load(force=True)
     loaded = manager._plugins["incontext"]
@@ -210,4 +214,7 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
         runtime.settings.compression_window - TokenizerHandler.prompt_tokens
     )
 
-    assert len(TokenizerHandler.requests) == 4
+    # The bounded public request above has the same provider-visible prompt as
+    # the first request, so VllmBackend correctly serves it from cache. The two
+    # distinct auxiliary prompts each require one additional tokenizer call.
+    assert len(TokenizerHandler.requests) == 3
