@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
@@ -812,6 +813,57 @@ def test_clear_cache_forces_new_request() -> None:
     assert backend.count(request, context_length=65_536) == 1
     backend.clear_cache()
     assert backend.count(request, context_length=65_536) == 2
+
+
+def test_clear_cache_invalidates_an_inflight_tokenizer_response() -> None:
+    """Prevent an old HTTP result from repopulating a freshly cleared cache.
+
+    Cache invalidation can race a slow ``/tokenize`` call during a model or
+    configuration transition.  The in-flight caller may finish with its valid
+    old response, but that response must not become a cache hit after
+    ``clear_cache``; the next caller has to observe the new tokenizer result.
+    """
+
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+
+    def opener(
+        request: urllib.request.Request,
+        *,
+        timeout: float,
+    ) -> FakeResponse:
+        del request, timeout
+        calls.append(len(calls) + 1)
+        if len(calls) == 1:
+            started.set()
+            assert release.wait(timeout=2)
+        return FakeResponse(json.dumps(response(calls[-1])).encode())
+
+    with patch.dict(
+        "os.environ",
+        {"INCONTEXT_TOKENIZER_URL": "https://inference.test/tokenize"},
+        clear=True,
+    ):
+        backend = VllmBackend(opener=opener)
+    request = {"model": "qwen", "messages": []}
+    first_result: list[int] = []
+    worker = threading.Thread(
+        target=lambda: first_result.append(
+            backend.count(request, context_length=65_536),
+        ),
+    )
+
+    worker.start()
+    assert started.wait(timeout=2)
+    backend.clear_cache()
+    release.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert first_result == [1]
+    assert backend.count(request, context_length=65_536) == 2
+    assert calls == [1, 2]
 
 
 def test_transport_failure_is_not_cached() -> None:

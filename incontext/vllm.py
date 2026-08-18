@@ -84,6 +84,7 @@ class VllmBackend(Backend):
         self._opener = urllib.request.urlopen if opener is None else opener
         self._cache: OrderedDict[str, int] = OrderedDict()
         self._cache_lock = threading.Lock()
+        self._cache_epoch = 0
 
     @property
     def source(self) -> str:
@@ -114,6 +115,7 @@ class VllmBackend(Backend):
             encoded + b":" + str(context_length).encode("ascii"),
         ).hexdigest()
         with self._cache_lock:
+            cache_epoch = self._cache_epoch
             cached = self._cache.get(cache_key)
             if cached is not None:
                 self._cache.move_to_end(cache_key)
@@ -155,10 +157,11 @@ class VllmBackend(Backend):
             )
 
         with self._cache_lock:
-            self._cache[cache_key] = count
-            self._cache.move_to_end(cache_key)
-            while len(self._cache) > self._cache_entries:
-                self._cache.popitem(last=False)
+            if cache_epoch == self._cache_epoch:
+                self._cache[cache_key] = count
+                self._cache.move_to_end(cache_key)
+                while len(self._cache) > self._cache_entries:
+                    self._cache.popitem(last=False)
         if reused_prompt_tokens is not None:
             return reused_prompt_tokens
         return min(count, truncation_limit) if truncation_limit is not None else count
@@ -167,6 +170,7 @@ class VllmBackend(Backend):
         """Discard cached counts without disturbing an in-flight request."""
 
         with self._cache_lock:
+            self._cache_epoch += 1
             self._cache.clear()
 
     @staticmethod
