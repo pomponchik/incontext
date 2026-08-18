@@ -721,7 +721,8 @@ def test_count_does_not_cap_multimodal_prompt_after_media_expansion() -> None:
         ("invalid", False),
         (["invalid", {"content": "plain"}], False),
         ([{"content": {"image_url": "data:"}}], True),
-        ([{"content": ["invalid-part"]}], True),
+        ([{"content": [123]}], True),
+        ([{"content": ["plain string"]}], False),
         ([{"content": [{"type": "text", "text": "plain"}]}], False),
         ([{"content": [{"type": "input_text", "text": "plain"}]}], False),
     ],
@@ -739,6 +740,34 @@ def test_multimodal_detection_is_conservative_for_wire_message_shapes(
     """
 
     assert VllmBackend._has_multimodal_content({"messages": messages}) is expected
+
+
+@pytest.mark.parametrize("part_type", ["output_text", "refusal", "thinking"])
+def test_count_truncates_vllm_structured_text_content_parts(
+    part_type: str,
+) -> None:
+    """Do not mistake vLLM-supported structured text for multimodal input.
+
+    vLLM converts refusal, thinking, and output-text content parts to ordinary
+    strings before tokenization.  No media placeholders are expanded, so a
+    positive truncation value bounds the final provider-visible prompt exactly.
+    Classifying these parts as media would under-allocate completion space and
+    can trigger premature compression.
+    """
+
+    backend, _ = make_backend([response(120)])
+    request = {
+        "model": "qwen",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [{"type": part_type, part_type: "plain text"}],
+            },
+        ],
+        "truncate_prompt_tokens": 50,
+    }
+
+    assert backend.count(request, context_length=65_536) == 50
 
 
 def test_cached_raw_count_supports_distinct_truncation_limits() -> None:

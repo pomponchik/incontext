@@ -354,8 +354,12 @@ class VllmBackend(Backend):
             if isinstance(content, dict):
                 return True
             if isinstance(content, list) and any(
-                not isinstance(part, dict)
-                or part.get("type") not in {"text", "input_text"}
+                not isinstance(part, (dict, str))
+                or (
+                    isinstance(part, dict)
+                    and part.get("type")
+                    not in {"text", "input_text", "output_text", "refusal", "thinking"}
+                )
                 for part in content
             ):
                 return True
