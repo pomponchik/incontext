@@ -154,6 +154,64 @@ def test_build_payload_applies_extra_body_to_core_chat_fields() -> None:
     }
 
 
+def test_build_payload_reproduces_vllm_reasoning_and_rag_rendering() -> None:
+    """Translate chat-only fields into the equivalent tokenize parameters.
+
+    vLLM injects ``documents`` and ``reasoning_effort`` into Jinja template
+    kwargs and derives ``enable_thinking`` when the caller did not set it.
+    Media IO options are forwarded directly.  Missing this transformation can
+    make Qwen's generation prompt tens of tokens different before any content
+    or tool-schema growth is considered.
+    """
+
+    request = {
+        "model": "qwen",
+        "messages": [{"role": "user", "content": "answer from context"}],
+        "reasoning_effort": "high",
+        "documents": [{"title": "top", "text": "ignored by extra_body"}],
+        "chat_template_kwargs": {"custom": "value"},
+        "media_io_kwargs": {"image": {"num_frames": 1}},
+        "extra_body": {
+            "reasoning_effort": "none",
+            "documents": [{"title": "final", "text": "document"}],
+            "media_io_kwargs": {"video": {"num_frames": 4}},
+        },
+    }
+
+    payload = VllmBackend._build_payload(request)
+
+    assert payload["chat_template_kwargs"] == {
+        "custom": "value",
+        "documents": [{"title": "final", "text": "document"}],
+        "reasoning_effort": "none",
+        "enable_thinking": False,
+    }
+    assert payload["media_io_kwargs"] == {"video": {"num_frames": 4}}
+
+
+def test_build_payload_preserves_explicit_thinking_override() -> None:
+    """Let caller template kwargs override vLLM's reasoning-derived default.
+
+    The chat-completions renderer derives ``enable_thinking`` only when that
+    key is absent.  An explicit value must survive even when reasoning effort
+    would otherwise imply the opposite setting.
+    """
+
+    payload = VllmBackend._build_payload(
+        {
+            "model": "qwen",
+            "messages": [],
+            "reasoning_effort": "none",
+            "chat_template_kwargs": {"enable_thinking": True},
+        },
+    )
+
+    assert payload["chat_template_kwargs"] == {
+        "enable_thinking": True,
+        "reasoning_effort": "none",
+    }
+
+
 @pytest.mark.parametrize(
     ("tools", "extra_body"),
     [("invalid", []), (None, None)],

@@ -173,6 +173,7 @@ class VllmBackend(Backend):
             "add_special_tokens",
             "chat_template",
             "chat_template_kwargs",
+            "media_io_kwargs",
             "mm_processor_kwargs",
         )
         for option in prompt_options:
@@ -182,6 +183,24 @@ class VllmBackend(Backend):
                 # The OpenAI client merges extra_body over its generated JSON;
                 # mirror that precedence for the tokenizer request.
                 payload[option] = extra_body[option]
+        template_kwargs = payload.get("chat_template_kwargs")
+        if template_kwargs is None or isinstance(template_kwargs, dict):
+            merged_template_kwargs = dict(template_kwargs or {})
+            documents = extra_body.get("documents", request.get("documents"))
+            reasoning_effort = extra_body.get(
+                "reasoning_effort",
+                request.get("reasoning_effort"),
+            )
+            if documents is not None:
+                merged_template_kwargs["documents"] = documents
+            if reasoning_effort is not None:
+                merged_template_kwargs["reasoning_effort"] = reasoning_effort
+                if "enable_thinking" not in merged_template_kwargs:
+                    merged_template_kwargs["enable_thinking"] = (
+                        reasoning_effort != "none"
+                    )
+            if merged_template_kwargs or isinstance(template_kwargs, dict):
+                payload["chat_template_kwargs"] = merged_template_kwargs
         payload.setdefault("add_generation_prompt", True)
         return payload
 
