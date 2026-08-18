@@ -389,6 +389,55 @@ def test_cleanup_never_overwrites_later_preflight_bindings(
     assert turn_context.estimate_request_tokens_rough is replacement
 
 
+def test_partial_foreign_replacement_keeps_each_preflight_owner_isolated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Track ownership independently for both imported Hermes bindings.
+
+    Another plugin may replace only one of Hermes' two estimator copies after
+    profile A loads.  Loading and then unloading profile B must restore that
+    foreign replacement on the changed module while retaining A's still-owned
+    wrapper on the untouched module.  A single tuple-wide refcount previously
+    forgot A and removed its live wrapper during B's unload.
+    """
+
+    def rough(
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+    ) -> int:
+        del messages, system_prompt, tools
+        return 5
+
+    loop, turn_context = install_fake_hermes(monkeypatch, rough)
+    first_cleanup = install(runtime(Counter(100)))
+    assert callable(first_cleanup)
+
+    def replacement(
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+    ) -> int:
+        del messages, system_prompt, tools
+        return 99
+
+    turn_context.estimate_request_tokens_rough = replacement  # type: ignore[attr-defined]
+    second_cleanup = install(runtime(Counter(200)))
+    assert callable(second_cleanup)
+    assert loop.estimate_request_tokens_rough([]) == 200
+    assert turn_context.estimate_request_tokens_rough([]) == 200
+
+    second_cleanup()
+    assert loop.estimate_request_tokens_rough([]) == 100
+    assert turn_context.estimate_request_tokens_rough is replacement
+
+    first_cleanup()
+    assert loop.estimate_request_tokens_rough is rough
+    assert turn_context.estimate_request_tokens_rough is replacement
+
+
 def test_stale_preflight_cleanup_cannot_remove_new_installation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

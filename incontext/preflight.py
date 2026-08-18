@@ -28,6 +28,23 @@ class _ExactPreflight:
     ) -> None:
         self.runtime_source = runtime
         self.original = original
+        self._owners: List[Tuple[object, RuntimeSource]] = []
+
+    def acquire(self, owner: object, runtime: RuntimeSource) -> None:
+        """Attach one installation owner and make its runtime current."""
+
+        self._owners.append((owner, runtime))
+
+    def release(self, owner: object) -> None:
+        """Release one installation owner without disturbing the others."""
+
+        self._owners = [entry for entry in self._owners if entry[0] is not owner]
+
+    @property
+    def owned(self) -> bool:
+        """Return whether this wrapper belongs to an active installation."""
+
+        return bool(self._owners)
 
     def __call__(
         self,
@@ -81,44 +98,13 @@ class _ExactPreflight:
             return rough_tokens + runtime.settings.fallback_margin_tokens
 
     def _runtime(self) -> Optional[DynamicOutputBudget]:
-        if isinstance(self.runtime_source, DynamicOutputBudget):
-            return self.runtime_source
-        return self.runtime_source()
+        runtime_source = self._owners[-1][1] if self._owners else self.runtime_source
+        if isinstance(runtime_source, DynamicOutputBudget):
+            return runtime_source
+        return runtime_source()
 
 
 _install_lock = threading.Lock()
-_installed_wrappers: Tuple[_ExactPreflight, ...] = ()
-_installed_modules: Tuple[Any, ...] = ()
-_install_count = 0
-
-
-def _owns_bindings(modules: Tuple[Any, ...]) -> bool:
-    return (
-        _installed_modules == modules
-        and bool(_installed_wrappers)
-        and all(
-            module.__dict__.get("estimate_request_tokens_rough") is wrapper
-            for module, wrapper in zip(_installed_modules, _installed_wrappers)
-        )
-    )
-
-
-def _replace_bindings(
-    modules: Tuple[Any, ...],
-    runtime: RuntimeSource,
-) -> Tuple[_ExactPreflight, ...]:
-    created: List[_ExactPreflight] = []
-    for module in modules:
-        current = module.__dict__["estimate_request_tokens_rough"]
-        original = (
-            current.original
-            if isinstance(current, _ExactPreflight)
-            else cast(RoughEstimator, current)
-        )
-        wrapper = _ExactPreflight(runtime, original)
-        module.__dict__["estimate_request_tokens_rough"] = wrapper
-        created.append(wrapper)
-    return tuple(created)
 
 
 def install(runtime: RuntimeSource) -> Optional[Cleanup]:
@@ -142,18 +128,18 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
         return None
 
     modules = (turn_context, conversation_loop)
-    global _install_count, _installed_modules, _installed_wrappers  # noqa: PLW0603
+    owner = object()
+    wrappers: List[Tuple[Any, _ExactPreflight]] = []
     with _install_lock:
-        if _owns_bindings(modules):
-            wrappers = _installed_wrappers
-            for wrapper in wrappers:
-                wrapper.runtime_source = runtime
-            _install_count += 1
-        else:
-            wrappers = _replace_bindings(modules, runtime)
-            _installed_modules = modules
-            _installed_wrappers = wrappers
-            _install_count = 1
+        for module in modules:
+            current = module.__dict__["estimate_request_tokens_rough"]
+            if isinstance(current, _ExactPreflight) and current.owned:
+                wrapper = current
+            else:
+                wrapper = _ExactPreflight(runtime, cast(RoughEstimator, current))
+                module.__dict__["estimate_request_tokens_rough"] = wrapper
+            wrapper.acquire(owner, runtime)
+            wrappers.append((module, wrapper))
 
     closed = False
 
@@ -161,21 +147,16 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
         """Release one owner and restore every unchanged Hermes binding."""
 
         nonlocal closed
-        global _install_count, _installed_modules, _installed_wrappers  # noqa: PLW0603
         with _install_lock:
             if closed:
                 return
             closed = True
-            if wrappers != _installed_wrappers:
-                return
-            _install_count -= 1
-            if _install_count == 0:
-                for module, wrapper in zip(modules, wrappers):
-                    if module.__dict__.get("estimate_request_tokens_rough") is wrapper:
-                        module.__dict__["estimate_request_tokens_rough"] = (
-                            wrapper.original
-                        )
-                _installed_modules = ()
-                _installed_wrappers = ()
+            for module, wrapper in wrappers:
+                wrapper.release(owner)
+                if (
+                    not wrapper.owned
+                    and module.__dict__.get("estimate_request_tokens_rough") is wrapper
+                ):
+                    module.__dict__["estimate_request_tokens_rough"] = wrapper.original
 
     return cleanup
