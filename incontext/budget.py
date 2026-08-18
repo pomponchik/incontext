@@ -37,6 +37,7 @@ def compute_max_tokens(
 
 def _requested_output_cap(
     request: Dict[str, Any],
+    coerce: Callable[[Any], Optional[int]],
 ) -> Optional[Tuple[str, int]]:
     """Return the provider field and smallest valid caller cap."""
 
@@ -44,17 +45,13 @@ def _requested_output_cap(
     top_level_caps = [
         (field, value)
         for field in OUTPUT_BUDGET_FIELDS
-        if not isinstance((value := request.get(field)), bool)
-        and isinstance(value, int)
-        and value > 0
+        if (value := coerce(request.get(field))) is not None
     ]
     nested_caps = (
         [
             (field, value)
             for field in OUTPUT_BUDGET_FIELDS
-            if not isinstance((value := extra_body.get(field)), bool)
-            and isinstance(value, int)
-            and value > 0
+            if (value := coerce(extra_body.get(field))) is not None
         ]
         if isinstance(extra_body, dict)
         else []
@@ -178,7 +175,10 @@ class DynamicOutputBudget:
                 self.settings.compression_window,
             )
             return None
-        requested_output_cap = _requested_output_cap(request)
+        requested_output_cap = _requested_output_cap(
+            request,
+            self.backend.coerce_output_budget,
+        )
         output_field = "max_tokens"
         if requested_output_cap is not None:
             output_field, requested_cap = requested_output_cap

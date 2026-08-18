@@ -86,6 +86,27 @@ def test_vllm_maps_responses_output_cap_to_chat_completions() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("wire_value", "expected"),
+    [("5", 5), (5.0, 5), (True, 1), (0, None), (1.5, None)],
+)
+def test_vllm_coerces_output_caps_like_chat_request_validation(
+    wire_value: Any,
+    expected: int | None,
+) -> None:
+    """Expose only positive caps that vLLM's request model will enforce.
+
+    Its Pydantic schema accepts integer strings, integral floats, and booleans
+    before validating positivity.  Dynamic budgeting must preserve those
+    caller bounds, while fractional and non-positive values remain invalid and
+    cannot influence the emitted provider request.
+    """
+
+    backend, _ = make_backend()
+
+    assert backend.coerce_output_budget(wire_value) == expected
+
+
 def test_default_user_agent_tracks_distribution_version() -> None:
     """Keep the tokenizer transport identity aligned with package metadata.
 

@@ -448,6 +448,49 @@ def test_existing_output_cap_is_never_increased(
     assert result["request"]["max_tokens"] == min(free_space, requested_cap)
 
 
+@pytest.mark.parametrize("wire_cap", ["5", 5.0])
+def test_runtime_honors_output_caps_coerced_by_backend(
+    wire_cap: Any,
+) -> None:
+    """Never increase a caller cap accepted by the selected provider.
+
+    OpenAI ``extra_body`` values reach provider validation unchanged.  Some
+    compatible servers coerce integer strings and integral floats to integers;
+    ignoring that accepted small bound would delete it and replace it with the
+    much larger dynamic remainder.  The backend contract must own this
+    provider-specific validation while the generic middleware preserves the
+    resulting cap.
+    """
+
+    class CoercingCounter(Counter):
+        def coerce_output_budget(self, value: Any) -> int | None:
+            if isinstance(value, (str, float)):
+                return int(value)
+            return super().coerce_output_budget(value)
+
+    runtime_settings = Settings(
+        model_name="qwen",
+        context_length=1000,
+        compression_window=800,
+        fallback_margin_tokens=10,
+        provider="",
+        base_url="",
+    )
+    runtime = budget.DynamicOutputBudget(runtime_settings, CoercingCounter(100))
+
+    result = runtime(
+        request={
+            "model": "qwen",
+            "messages": [],
+            "extra_body": {"max_tokens": wire_cap},
+        },
+    )
+
+    assert result is not None
+    assert result["request"]["max_tokens"] == 5
+    assert result["request"]["extra_body"] == {}
+
+
 def test_runtime_fallback_reserves_safety_margin(
     runtime_settings: Settings,
     caplog: pytest.LogCaptureFixture,

@@ -100,6 +100,12 @@ class VllmBackend(Backend):
             "max_tokens" if requested_field == "max_output_tokens" else requested_field
         )
 
+    def coerce_output_budget(self, value: Any) -> Optional[int]:
+        """Mirror vLLM's non-strict positive integer output caps."""
+
+        coerced = self._coerce_non_strict_integer(value)
+        return coerced if coerced is not None and coerced > 0 else None
+
     def count(
         self,
         request: Dict[str, Any],
@@ -285,17 +291,7 @@ class VllmBackend(Backend):
             if isinstance(extra_body, dict)
             else request.get("truncate_prompt_tokens")
         )
-        coerced: Optional[int]
-        if isinstance(value, bool):
-            coerced = int(value)
-        elif isinstance(value, int):
-            coerced = value
-        elif (
-            isinstance(value, float) and math.isfinite(value) and value.is_integer()
-        ) or (isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip())):
-            coerced = int(value)
-        else:
-            coerced = None
+        coerced = cls._coerce_non_strict_integer(value)
         if coerced == -1:
             raise cls.VllmBackendError(
                 "truncate_prompt_tokens=-1 depends on the provider output budget",
@@ -309,6 +305,20 @@ class VllmBackend(Backend):
             # is the only conservative value available to this client.
             return None
         return coerced
+
+    @staticmethod
+    def _coerce_non_strict_integer(value: Any) -> Optional[int]:
+        """Mirror the safe subset of vLLM's non-strict integer coercion."""
+
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if (
+            isinstance(value, float) and math.isfinite(value) and value.is_integer()
+        ) or (isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip())):
+            return int(value)
+        return None
 
     @classmethod
     def _reused_prompt_token_count(cls, request: Dict[str, Any]) -> Optional[int]:

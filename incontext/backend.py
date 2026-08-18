@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pristan import slot
 
@@ -39,6 +39,13 @@ class Backend(ABC):
         """Return the provider-supported wire alias for an output budget."""
 
         return requested_field
+
+    def coerce_output_budget(self, value: Any) -> Optional[int]:
+        """Return a positive caller cap accepted by this provider."""
+
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return None
+        return int(value)
 
 
 @slot(
