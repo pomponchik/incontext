@@ -596,6 +596,54 @@ def test_load_settings_uses_hermes_live_identity_for_builtin_alias(
     assert result.provider == "zai"
 
 
+@pytest.mark.parametrize(
+    "provider_sections",
+    [
+        {"providers": {"anthropic": {"api": "https://shadow.invalid/v1"}}},
+        {
+            "custom_providers": [
+                {"name": "anthropic", "base_url": "https://shadow.invalid/v1"}
+            ]
+        },
+    ],
+)
+def test_canonical_builtin_provider_is_not_shadowed_by_custom_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_sections: Mapping[str, Any],
+) -> None:
+    """Preserve Hermes' canonical built-in route over a colliding custom name.
+
+    Hermes asks its auth registry whether a bare selector is already canonical
+    before scanning either custom-provider schema.  Treating an ``anthropic``
+    entry as authoritative changes the live provider to ``custom`` and makes
+    both route guards reject every real primary request, silently disabling
+    exact budgeting.
+    """
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []  # type: ignore[attr-defined]
+    auth = types.ModuleType("hermes_cli.auth")
+    auth.resolve_provider = lambda provider: provider  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", auth)
+
+    result = load(
+        config={
+            "model": {
+                "default": "claude-sonnet-4.6",
+                "provider": "anthropic",
+                "base_url": "https://api.anthropic.example/v1",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            **provider_sections,
+        },
+    )
+
+    assert result.provider == "anthropic"
+    assert result.base_url == "https://api.anthropic.example/v1"
+
+
 def test_load_settings_keeps_provider_when_hermes_alias_resolution_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -354,20 +354,20 @@ def _configured_provider(
     )
 
 
-def _canonical_builtin_provider(provider: str) -> str:
-    """Use Hermes' installed alias registry for ordinary provider selectors."""
+def _resolved_builtin_provider(provider: str) -> Optional[str]:
+    """Return Hermes' canonical built-in identity when its registry accepts it."""
 
     try:
         from hermes_cli.auth import (  # type: ignore[import-not-found]  # noqa: PLC0415
             resolve_provider,
         )
     except (ImportError, AttributeError):
-        return provider
+        return None
     try:
         resolved = _normalized_provider_selector(resolve_provider(provider))
     except Exception:  # noqa: BLE001
-        return provider
-    return resolved or provider
+        return None
+    return resolved or None
 
 
 def _effective_model_name(model: str, provider: str) -> str:
@@ -387,6 +387,26 @@ def _effective_model_name(model: str, provider: str) -> str:
     except Exception:  # noqa: BLE001
         return model
     return normalized if isinstance(normalized, str) and normalized.strip() else model
+
+
+def _effective_bare_provider(
+    provider: str,
+    providers: Mapping[str, Any],
+    custom_providers: Any,
+) -> Tuple[str, Mapping[str, Any], bool]:
+    """Resolve a non-empty, non-custom selector using Hermes' precedence."""
+
+    canonical = _resolved_builtin_provider(provider)
+    if canonical == provider:
+        return canonical, {}, False
+    configured = _configured_provider(providers, custom_providers, provider)
+    if configured is not None:
+        return "custom", configured, True
+    if canonical is not None:
+        return canonical, {}, False
+    if provider in {"vllm", "ollama", "llamacpp"}:
+        return "custom", {}, False
+    return provider, {}, False
 
 
 def _effective_provider_route(
@@ -415,19 +435,11 @@ def _effective_provider_route(
         provider_config = configured_provider
         named = True
     elif provider_selector not in {"", "custom"}:
-        configured_provider = _configured_provider(
+        provider, provider_config, named = _effective_bare_provider(
+            provider_selector,
             providers,
             custom_providers,
-            provider_selector,
         )
-        if configured_provider is not None:
-            provider = "custom"
-            provider_config = configured_provider
-            named = True
-        elif provider_selector in {"vllm", "ollama", "llamacpp"}:
-            provider = "custom"
-        else:
-            provider = _canonical_builtin_provider(provider_selector)
     else:
         configured_provider = providers.get(provider)
         if configured_provider is None and provider == "custom":
