@@ -166,9 +166,10 @@ class VllmBackend(Backend):
     ) -> Dict[str, Any]:
         extra_body = request.get("extra_body")
         extra_body = extra_body if isinstance(extra_body, dict) else {}
+        messages = extra_body.get("messages", request.get("messages"))
         payload: Dict[str, Any] = {
             "model": extra_body.get("model", request.get("model")),
-            "messages": extra_body.get("messages", request.get("messages")),
+            "messages": VllmBackend._normalize_messages(messages),
         }
         tools = extra_body.get("tools", request.get("tools"))
         if isinstance(tools, list):
@@ -209,6 +210,26 @@ class VllmBackend(Backend):
                 payload["chat_template_kwargs"] = merged_template_kwargs
         payload.setdefault("add_generation_prompt", True)
         return payload
+
+    @staticmethod
+    def _normalize_messages(messages: Any) -> Any:
+        """Mirror vLLM's deprecated reasoning-field normalization."""
+
+        if not isinstance(messages, list) or not any(
+            isinstance(message, dict) and "reasoning_content" in message
+            for message in messages
+        ):
+            return messages
+        normalized = []
+        for message in messages:
+            if not isinstance(message, dict) or "reasoning_content" not in message:
+                normalized.append(message)
+                continue
+            normalized_message = dict(message)
+            reasoning_content = normalized_message.pop("reasoning_content")
+            normalized_message.setdefault("reasoning", reasoning_content)
+            normalized.append(normalized_message)
+        return normalized
 
     @classmethod
     def _positive_response_integer(

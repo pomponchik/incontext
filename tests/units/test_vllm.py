@@ -209,6 +209,58 @@ def test_build_payload_reproduces_vllm_reasoning_and_rag_rendering() -> None:
     assert payload["media_io_kwargs"] == {"video": {"num_frames": 4}}
 
 
+def test_build_payload_normalizes_deprecated_reasoning_content() -> None:
+    """Tokenize the same assistant reasoning field that generation renders.
+
+    vLLM's chat-completion validator migrates legacy ``reasoning_content`` to
+    ``reasoning`` before rendering, while its tokenize request accepts only the
+    new field.  Mirroring the migration avoids an exact-count drift and must
+    not mutate the request that Hermes may reuse for retries.
+    """
+
+    legacy = {
+        "role": "assistant",
+        "content": "answer",
+        "reasoning_content": "private trace",
+    }
+    modern = {
+        "role": "assistant",
+        "content": "answer",
+        "reasoning": "preferred trace",
+        "reasoning_content": "obsolete trace",
+    }
+    messages: list[Any] = ["invalid-provider-value", legacy, modern]
+
+    payload = VllmBackend._build_payload({"model": "qwen", "messages": messages})
+
+    assert payload["messages"] == [
+        "invalid-provider-value",
+        {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning": "private trace",
+        },
+        {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning": "preferred trace",
+        },
+    ]
+    assert legacy["reasoning_content"] == "private trace"
+    assert modern["reasoning_content"] == "obsolete trace"
+
+
+def test_reasoning_normalization_preserves_unvalidated_message_shapes() -> None:
+    """Leave non-list message input for vLLM to validate on both endpoints.
+
+    Incontext owns prompt equivalence, not provider schema repair.  Returning a
+    malformed scalar unchanged ensures ``/tokenize`` rejects the same value as
+    chat generation instead of silently manufacturing a different prompt.
+    """
+
+    assert VllmBackend._normalize_messages("invalid") == "invalid"
+
+
 def test_build_payload_preserves_explicit_thinking_override() -> None:
     """Let caller template kwargs override vLLM's reasoning-derived default.
 
