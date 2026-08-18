@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from importlib import import_module
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from .budget import DynamicOutputBudget
 
