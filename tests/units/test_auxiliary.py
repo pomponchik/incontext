@@ -135,6 +135,73 @@ def test_auxiliary_without_a_caller_bound_uses_the_free_window(
     assert result["max_tokens"] == 64_000 - 12_345
 
 
+@pytest.mark.parametrize("caller_cap", [None, 2048])
+def test_auxiliary_uses_hermes_provider_output_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    caller_cap: int | None,
+) -> None:
+    """Use Hermes' own model-aware selector for omitted output fields.
+
+    Hermes deliberately omits an auxiliary cap before choosing a provider's
+    accepted wire alias.  New OpenAI models reject the generic ``max_tokens``
+    field, so both bounded and unbounded calls must seed dynamic budgeting with
+    ``max_completion_tokens`` when Hermes selects it.
+    """
+
+    auxiliary, _ = install_fake_hermes(monkeypatch)
+    selections: list[tuple[int, str]] = []
+
+    def select(value: int, *, model: str) -> dict[str, int]:
+        selections.append((value, model))
+        return {"max_completion_tokens": value}
+
+    auxiliary.auxiliary_max_tokens_param = select  # type: ignore[attr-defined]
+    install(runtime(Counter(12_345)))
+
+    result = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "title"}],
+        max_tokens=caller_cap,
+    )
+
+    seed = 64_000 if caller_cap is None else caller_cap
+    assert selections == [(seed, "qwen-test")]
+    assert result["max_completion_tokens"] == min(seed, 64_000 - 12_345)
+    assert "max_tokens" not in result
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        lambda value, **context: {"max_tokens": False},
+        lambda value, **context: (_ for _ in ()).throw(RuntimeError("boom")),
+    ],
+)
+def test_auxiliary_falls_back_from_an_invalid_hermes_output_selector(
+    selector: Any,
+) -> None:
+    """Keep auxiliary requests usable when a Hermes selector is incompatible.
+
+    The helper is a private Hermes API and may be absent, raise, or return an
+    invalid cap during a version transition.  Such failures must degrade to
+    the long-supported ``max_tokens`` field rather than disabling all
+    auxiliary calls before they reach the provider.
+    """
+
+    def build(provider: str, model: str, messages: list[Any]) -> dict[str, Any]:
+        del provider
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(
+        runtime(Counter(12_345)),
+        build,
+        selector,
+    )("custom", "qwen-test", [{"role": "user", "content": "title"}])
+
+    assert result["max_tokens"] == 64_000 - 12_345
+
+
 def test_auxiliary_wrapper_accepts_additive_hermes_parameters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -524,6 +591,7 @@ def test_install_is_idempotent_and_updates_the_runtime(
             "extra_body": None,
             "reasoning_config": None,
             "task": None,
+            "max_tokens": 64_000,
         }
     ]
 

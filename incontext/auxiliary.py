@@ -8,11 +8,12 @@ from importlib import import_module
 from inspect import Parameter, Signature, signature
 from typing import Any, Callable, Dict, Optional, Union, cast
 
-from .budget import DynamicOutputBudget
+from .budget import OUTPUT_BUDGET_FIELDS, DynamicOutputBudget
 from .settings import normalize_base_url
 
 LOGGER = logging.getLogger(__name__)
 AuxiliaryBuilder = Callable[..., Dict[str, Any]]
+OutputCapSelector = Callable[..., Dict[str, Any]]
 RuntimeSource = Union[
     DynamicOutputBudget,
     Callable[[], Optional[DynamicOutputBudget]],
@@ -27,9 +28,11 @@ class _AuxiliaryBudget:
         self,
         runtime: RuntimeSource,
         original: AuxiliaryBuilder,
+        output_cap_selector: Optional[OutputCapSelector] = None,
     ) -> None:
         self.runtime_source = runtime
         self.original = original
+        self.output_cap_selector = output_cap_selector
         self.signature: Signature = signature(original)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
@@ -60,18 +63,40 @@ class _AuxiliaryBudget:
             field in original_request
             for field in ("max_tokens", "max_completion_tokens", "max_output_tokens")
         )
-        if (
-            not has_output_cap
-            and isinstance(max_tokens, int)
-            and not isinstance(max_tokens, bool)
-            and max_tokens > 0
-        ):
-            # Hermes deliberately omits this field for most auxiliary custom
-            # providers. Restore the caller's bound before incontext chooses
-            # the smaller of it and the exact free compression-window space.
-            request = {**request, "max_tokens": max_tokens}
+        if not has_output_cap:
+            # Ask Hermes which wire field this model accepts.  The compression
+            # window is only a non-constraining seed when the caller supplied
+            # no cap; incontext replaces it with the exact free remainder.
+            seed = (
+                max_tokens
+                if isinstance(max_tokens, int)
+                and not isinstance(max_tokens, bool)
+                and max_tokens > 0
+                else runtime.settings.compression_window
+            )
+            request = {**request, **self._output_cap(seed, model)}
         result = runtime(request=request)
         return original_request if result is None else result["request"]
+
+    def _output_cap(self, value: int, model: Any) -> Dict[str, int]:
+        """Select Hermes' provider-specific output-cap alias safely."""
+
+        if self.output_cap_selector is not None:
+            try:
+                selected = self.output_cap_selector(value, model=model)
+            except Exception:  # noqa: BLE001
+                selected = None
+            if isinstance(selected, dict):
+                valid = {
+                    field: cap
+                    for field in OUTPUT_BUDGET_FIELDS
+                    if isinstance((cap := selected.get(field)), int)
+                    and not isinstance(cap, bool)
+                    and cap > 0
+                }
+                if valid:
+                    return valid
+        return {"max_tokens": value}
 
     def _runtime(self) -> Optional[DynamicOutputBudget]:
         if isinstance(self.runtime_source, DynamicOutputBudget):
@@ -108,10 +133,16 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
     global _install_count, _installed_wrapper  # noqa: PLW0603
     with _install_lock:
         current = auxiliary_client.__dict__["_build_call_kwargs"]
+        output_cap_selector = auxiliary_client.__dict__.get(
+            "auxiliary_max_tokens_param"
+        )
+        if not callable(output_cap_selector):
+            output_cap_selector = None
         if current is _installed_wrapper:
             wrapper = _installed_wrapper
             assert wrapper is not None
             wrapper.runtime_source = runtime
+            wrapper.output_cap_selector = output_cap_selector
             _install_count += 1
         else:
             original = (
@@ -119,7 +150,7 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
                 if isinstance(current, _AuxiliaryBudget)
                 else cast(AuxiliaryBuilder, current)
             )
-            wrapper = _AuxiliaryBudget(runtime, original)
+            wrapper = _AuxiliaryBudget(runtime, original, output_cap_selector)
             auxiliary_client.__dict__["_build_call_kwargs"] = wrapper
             _installed_wrapper = wrapper
             _install_count = 1
