@@ -315,6 +315,41 @@ def test_preflight_runtime_resolver_tracks_the_active_profile() -> None:
     assert calls == [None]
 
 
+def test_preflight_skips_profiles_without_an_active_plugin_owner() -> None:
+    """Use Hermes' estimator when the active profile did not load incontext.
+
+    The patched estimator binding is process-wide, but Hermes plugin managers
+    are profile-scoped.  Returning no runtime for the current home must avoid
+    both exact tokenization and any cross-profile prompt disclosure while a
+    different profile keeps the shared wrapper installed.
+    """
+
+    counter = Counter(999)
+
+    def rough(
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+    ) -> int:
+        assert messages == [{"role": "user", "content": "private"}]
+        assert system_prompt == "profile system"
+        assert tools == [{"type": "function"}]
+        return 17
+
+    wrapper = _ExactPreflight(lambda: None, rough)
+
+    assert (
+        wrapper(
+            [{"role": "user", "content": "private"}],
+            system_prompt="profile system",
+            tools=[{"type": "function"}],
+        )
+        == 17
+    )
+    assert counter.requests == []
+
+
 def test_cleanup_never_overwrites_later_preflight_bindings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

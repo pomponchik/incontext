@@ -373,6 +373,43 @@ def test_auxiliary_runtime_resolver_tracks_the_active_profile() -> None:
     assert calls == [None]
 
 
+def test_auxiliary_skips_profiles_without_an_active_plugin_owner() -> None:
+    """Preserve Hermes' request for a profile where incontext is disabled.
+
+    One imported auxiliary builder is shared by all profile managers in the
+    process.  If the active home's resolver returns no registered runtime, the
+    wrapper must return the original provider kwargs unchanged and avoid any
+    tokenizer request owned by another profile.
+    """
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        **options: Any,
+    ) -> dict[str, Any]:
+        return {
+            "provider": provider,
+            "model": model,
+            "messages": messages,
+            **options,
+        }
+
+    result = _AuxiliaryBudget(lambda: None, build)(
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "private"}],
+        max_tokens=2048,
+    )
+
+    assert result == {
+        "provider": "custom",
+        "model": "qwen-test",
+        "messages": [{"role": "user", "content": "private"}],
+        "max_tokens": 2048,
+    }
+
+
 @given(
     prompt_tokens=st.integers(min_value=1, max_value=63_999),
     caller_cap=st.integers(min_value=1, max_value=100_000),

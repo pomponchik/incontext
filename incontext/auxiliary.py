@@ -6,13 +6,16 @@ import logging
 import threading
 from importlib import import_module
 from inspect import Parameter, Signature, signature
-from typing import Any, Callable, Dict, Union, cast
+from typing import Any, Callable, Dict, Optional, Union, cast
 
 from .budget import DynamicOutputBudget
 
 LOGGER = logging.getLogger(__name__)
 AuxiliaryBuilder = Callable[..., Dict[str, Any]]
-RuntimeSource = Union[DynamicOutputBudget, Callable[[], DynamicOutputBudget]]
+RuntimeSource = Union[
+    DynamicOutputBudget,
+    Callable[[], Optional[DynamicOutputBudget]],
+]
 Cleanup = Callable[[], None]
 
 
@@ -29,8 +32,10 @@ class _AuxiliaryBudget:
         self.signature: Signature = signature(original)
 
     def __call__(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        runtime = self._runtime()
         original_request = self.original(*args, **kwargs)
+        runtime = self._runtime()
+        if runtime is None:
+            return original_request
         bound = self.signature.bind(*args, **kwargs)
         bound.apply_defaults()
         model = self._argument(bound.arguments, "model")
@@ -64,7 +69,7 @@ class _AuxiliaryBudget:
         result = runtime(request=request)
         return original_request if result is None else result["request"]
 
-    def _runtime(self) -> DynamicOutputBudget:
+    def _runtime(self) -> Optional[DynamicOutputBudget]:  # noqa: UP045
         if isinstance(self.runtime_source, DynamicOutputBudget):
             return self.runtime_source
         return self.runtime_source()

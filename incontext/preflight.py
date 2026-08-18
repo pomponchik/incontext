@@ -5,13 +5,16 @@ from __future__ import annotations
 import logging
 import threading
 from importlib import import_module
-from typing import Any, Callable, Union, cast
+from typing import Any, Callable, Optional, Union, cast
 
 from .budget import DynamicOutputBudget
 
 LOGGER = logging.getLogger(__name__)
 RoughEstimator = Callable[..., int]
-RuntimeSource = Union[DynamicOutputBudget, Callable[[], DynamicOutputBudget]]
+RuntimeSource = Union[
+    DynamicOutputBudget,
+    Callable[[], Optional[DynamicOutputBudget]],
+]
 Cleanup = Callable[[], None]
 
 
@@ -34,7 +37,7 @@ class _ExactPreflight:
         tools: Any = None,
     ) -> int:
         runtime = self._runtime()
-        if not isinstance(messages, list):
+        if runtime is None or not isinstance(messages, list):
             return int(
                 self.original(
                     messages,
@@ -77,7 +80,7 @@ class _ExactPreflight:
             )
             return rough_tokens + runtime.settings.fallback_margin_tokens
 
-    def _runtime(self) -> DynamicOutputBudget:
+    def _runtime(self) -> Optional[DynamicOutputBudget]:  # noqa: UP045
         if isinstance(self.runtime_source, DynamicOutputBudget):
             return self.runtime_source
         return self.runtime_source()

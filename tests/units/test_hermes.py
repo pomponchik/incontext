@@ -97,6 +97,107 @@ def test_get_runtime_isolated_by_active_hermes_home() -> None:
     assert builder.call_count == 2
 
 
+def test_active_runtime_is_scoped_to_registered_profiles() -> None:
+    """Never construct or expose a runtime for a disabled Hermes profile.
+
+    Hermes imports the preflight and auxiliary call sites once per process,
+    while plugin managers are scoped by a ContextVar-aware home.  A global
+    wrapper left alive by profile A must therefore see ``None`` under profile
+    B instead of lazily creating B's runtime and sending its prompt to A's
+    configured tokenizer endpoint.
+    """
+
+    runtime = mock.create_autospec(DynamicOutputBudget, instance=True)
+    with mock.patch.object(
+        hermes,
+        "_runtime_key",
+        return_value="profile-b",
+    ), mock.patch.object(hermes, "build_runtime", return_value=runtime) as builder:
+        assert hermes.get_active_runtime() is None
+    builder.assert_not_called()
+
+
+def test_active_runtime_builds_after_profile_activation() -> None:
+    """Lazily construct an active profile runtime if its cache was cleared.
+
+    Activation ownership and the runtime cache are deliberately independent so
+    a test, reload helper, or future cache eviction can remove a backend while
+    the profile remains registered.  The next wrapped call must rebuild only
+    that active profile instead of treating it as disabled.
+    """
+
+    runtime = mock.create_autospec(DynamicOutputBudget, instance=True)
+    with mock.patch.object(
+        hermes,
+        "_runtime_key",
+        return_value="profile-a",
+    ), mock.patch.object(hermes, "build_runtime", return_value=runtime) as builder:
+        hermes._activate_profile("profile-a")
+        assert hermes.get_active_runtime() is runtime
+    builder.assert_called_once_with()
+
+
+def test_profile_runtime_survives_until_its_last_owner_unloads() -> None:
+    """Retain one profile's cache while another manager still owns it.
+
+    Multiple PluginManager instances may point at the same Hermes home.  An
+    unload from either manager must decrement ownership without invalidating a
+    runtime that the remaining manager and its in-flight requests still use.
+    """
+
+    runtime = mock.create_autospec(DynamicOutputBudget, instance=True)
+    hermes._runtimes["profile-a"] = runtime
+    hermes._activate_profile("profile-a")
+    hermes._activate_profile("profile-a")
+
+    hermes._deactivate_profile("profile-a")
+
+    assert hermes._active_profiles == {"profile-a": 1}
+    assert hermes._runtimes == {"profile-a": runtime}
+
+
+def test_profile_unload_invalidates_its_cached_runtime() -> None:
+    """Rebuild settings and backend after the final profile owner unloads.
+
+    Force rediscovery is how Hermes applies a changed profile configuration.
+    Once all owners have unloaded, retaining the previous cached runtime would
+    silently preserve the old context window and tokenizer route on reload.
+    """
+
+    first = mock.create_autospec(DynamicOutputBudget, instance=True)
+    second = mock.create_autospec(DynamicOutputBudget, instance=True)
+    first.settings = mock.Mock(context_length=65_536, compression_window=64_000)
+    second.settings = mock.Mock(context_length=32_768, compression_window=31_000)
+    first_context = Context()
+    second_context = Context()
+    with mock.patch.object(
+        hermes,
+        "_runtime_key",
+        return_value="profile-a",
+    ), mock.patch.object(
+        hermes,
+        "build_runtime",
+        side_effect=[first, second],
+    ), mock.patch.object(
+        hermes,
+        "install_exact_preflight",
+        return_value=None,
+    ), mock.patch.object(
+        hermes,
+        "install_auxiliary_budget",
+        return_value=None,
+    ):
+        hermes.register(first_context)
+        assert hermes.get_active_runtime() is first
+
+        for callback in reversed(first_context.unload_callbacks):
+            callback()
+
+        assert hermes.get_active_runtime() is None
+        hermes.register(second_context)
+        assert hermes.get_active_runtime() is second
+
+
 def test_runtime_key_uses_context_aware_hermes_home(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -192,12 +293,13 @@ def test_register_validates_and_registers_middleware(
         return_value=auxiliary_cleanup,
     ) as install_auxiliary:
         install_preflight.return_value = preflight_cleanup
-        runtime_getter = hermes.get_runtime
+        runtime_getter = hermes.get_active_runtime
         hermes.register(context)
     install_preflight.assert_called_once_with(runtime_getter)
     install_auxiliary.assert_called_once_with(runtime_getter)
     assert context.calls == [("llm_request", hermes.apply_incontext)]
-    assert context.unload_callbacks == [preflight_cleanup, auxiliary_cleanup]
+    assert context.unload_callbacks[:2] == [preflight_cleanup, auxiliary_cleanup]
+    assert len(context.unload_callbacks) == 3
 
 
 def test_register_tolerates_legacy_context_without_unload_hook(
@@ -266,7 +368,7 @@ def test_register_skips_missing_cleanup_callbacks(
     ):
         hermes.register(context)
 
-    assert context.unload_callbacks == []
+    assert len(context.unload_callbacks) == 1
 
 
 def test_reset_runtime_removes_cached_value() -> None:
@@ -276,3 +378,4 @@ def test_reset_runtime_removes_cached_value() -> None:
     )
     hermes._reset_runtime_for_tests()
     assert hermes._runtimes == {}
+    assert hermes._active_profiles == {}
