@@ -128,18 +128,18 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
         LOGGER.warning("incontext exact preflight unavailable: Hermes is not installed")
         return None
 
-    modules = (turn_context, conversation_loop)
-    bindings = [
-        module.__dict__.get("estimate_request_tokens_rough") for module in modules
-    ]
-    if not all(callable(binding) for binding in bindings):
-        LOGGER.warning(
-            "incontext exact preflight unavailable: Hermes estimator API changed"
-        )
-        return None
     owner = object()
     wrappers: List[Tuple[Any, _ExactPreflight]] = []
     with _install_lock:
+        modules = (turn_context, conversation_loop)
+        bindings = [
+            module.__dict__.get("estimate_request_tokens_rough") for module in modules
+        ]
+        if not all(callable(binding) for binding in bindings):
+            LOGGER.warning(
+                "incontext exact preflight unavailable: Hermes estimator API changed"
+            )
+            return None
         for module, current in zip(modules, bindings):
             if isinstance(current, _ExactPreflight) and current.owned:
                 wrapper = current

@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from incontext import preflight
 from incontext.backend import Backend
 from incontext.budget import DynamicOutputBudget
 from incontext.preflight import _ExactPreflight, install
@@ -284,6 +285,81 @@ def test_cleanup_restores_all_preflight_bindings_after_final_owner(
     second_cleanup()
     assert loop.estimate_request_tokens_rough is rough
     assert turn_context.estimate_request_tokens_rough is rough
+
+
+def test_install_snapshot_is_serialized_with_final_owner_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never wrap an ownerless estimator released by a concurrent unload.
+
+    A new profile can begin preflight installation while the previous plugin
+    manager disposes its unload ledger on another thread.  If installation
+    snapshots the module bindings before taking ``_install_lock``, final-owner
+    cleanup can restore Hermes' rough estimator before the installer consumes
+    that stale snapshot.  Backend failure then traverses two exact wrappers,
+    adds the fallback margin twice, and restores the stale wrapper on cleanup.
+    Binding acquisition must therefore share cleanup's critical section.
+    """
+
+    def rough(
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+    ) -> int:
+        del messages, system_prompt, tools
+        return 5
+
+    loop, turn_context = install_fake_hermes(monkeypatch, rough)
+    active = runtime(Counter(OSError("tokenizer unavailable")))
+
+    def resolve() -> DynamicOutputBudget:
+        return active
+
+    old_cleanup = install(resolve)
+    assert callable(old_cleanup)
+
+    snapshot_requested = threading.Event()
+    old_cleaned = threading.Event()
+    mutex = threading.Lock()
+
+    class OrderedLock:
+        def __enter__(self) -> None:
+            if threading.current_thread().name == "new-install":
+                snapshot_requested.set()
+                assert old_cleaned.wait(timeout=2)
+            mutex.acquire()
+
+        def __exit__(self, *exc: Any) -> None:
+            mutex.release()
+            if threading.current_thread().name == "old-cleanup":
+                old_cleaned.set()
+
+    monkeypatch.setattr(preflight, "_install_lock", OrderedLock())
+    new_cleanups: list[Any] = []
+
+    installer = threading.Thread(
+        target=lambda: new_cleanups.append(install(resolve)),
+        name="new-install",
+    )
+    installer.start()
+    assert snapshot_requested.wait(timeout=2)
+
+    unloader = threading.Thread(target=old_cleanup, name="old-cleanup")
+    unloader.start()
+    unloader.join(timeout=2)
+    installer.join(timeout=2)
+
+    assert not unloader.is_alive()
+    assert not installer.is_alive()
+    assert len(new_cleanups) == 1
+    new_cleanup = new_cleanups[0]
+    assert callable(new_cleanup)
+    assert turn_context.estimate_request_tokens_rough([]) == 5 + 1024
+
+    new_cleanup()
+    assert turn_context.estimate_request_tokens_rough is rough
+    assert loop.estimate_request_tokens_rough is rough
 
 
 def test_preflight_runtime_resolver_tracks_the_active_profile() -> None:
