@@ -41,6 +41,37 @@ def get_runtime() -> DynamicOutputBudget:
         return runtime
 
 
+def _profile_cleanup(key: str) -> Callable[[], None]:
+    """Create an idempotent callback for one already-acquired profile owner."""
+
+    closed = False
+    cleanup_lock = threading.Lock()
+
+    def cleanup() -> None:
+        nonlocal closed
+        with cleanup_lock:
+            if closed:
+                return
+            closed = True
+        _deactivate_profile(key)
+
+    return cleanup
+
+
+def _acquire_profile_runtime(
+    key: str,
+) -> Tuple[DynamicOutputBudget, Callable[[], None]]:
+    """Acquire a validated runtime and its profile owner atomically."""
+
+    with _runtime_lock:
+        runtime = _runtimes.get(key)
+        if runtime is None:
+            runtime = build_runtime()
+            _runtimes[key] = runtime
+        _active_profiles[key] = _active_profiles.get(key, 0) + 1
+    return runtime, _profile_cleanup(key)
+
+
 def get_active_runtime() -> Optional[DynamicOutputBudget]:
     """Return a runtime only where an active profile loaded the plugin."""
 
@@ -60,19 +91,7 @@ def _activate_profile(key: str) -> Callable[[], None]:
 
     with _runtime_lock:
         _active_profiles[key] = _active_profiles.get(key, 0) + 1
-
-    closed = False
-    cleanup_lock = threading.Lock()
-
-    def cleanup() -> None:
-        nonlocal closed
-        with cleanup_lock:
-            if closed:
-                return
-            closed = True
-        _deactivate_profile(key)
-
-    return cleanup
+    return _profile_cleanup(key)
 
 
 def _deactivate_profile(key: str) -> None:
@@ -134,8 +153,7 @@ def register(ctx: Any) -> None:
             with _runtime_lock:
                 _runtimes[key] = runtime
         else:
-            runtime = get_runtime()
-            profile_cleanup = _activate_profile(key)
+            runtime, profile_cleanup = _acquire_profile_runtime(key)
             acquired: List[Callable[[], None]] = [profile_cleanup]
             try:
                 preflight_cleanup = install_exact_preflight(get_active_runtime)

@@ -157,6 +157,93 @@ def test_profile_runtime_survives_until_its_last_owner_unloads() -> None:
     assert hermes._runtimes == {"profile-a": runtime}
 
 
+def test_concurrent_registration_retains_its_validated_runtime(
+    runtime_settings: Settings,
+) -> None:
+    """Keep a successful concurrent registration's runtime cached.
+
+    Two plugin managers can target the same Hermes home while one unloads.  If
+    a new registration reads the cached runtime before acquiring its profile
+    owner, the old final-owner cleanup can evict that runtime in the gap.  The
+    registration then reports success with no cache, so its first request must
+    rebuild and may fail.  Runtime acquisition and owner increment must share
+    one critical section, leaving no observable owner-without-runtime state.
+    """
+
+    runtime = mock.Mock()
+    runtime.settings = runtime_settings
+    first_context = Context()
+    second_context = Context()
+    first_acquired = threading.Event()
+    allow_second = threading.Event()
+    failures: list[BaseException] = []
+    original_acquire = hermes._acquire_profile_runtime
+
+    def pause_after_acquisition(
+        key: str,
+    ) -> tuple[DynamicOutputBudget, Any]:
+        acquired = original_acquire(key)
+        first_acquired.set()
+        assert allow_second.wait(timeout=2)
+        return acquired
+
+    with mock.patch.object(
+        hermes,
+        "_runtime_key",
+        return_value="profile-a",
+    ), mock.patch.object(
+        hermes,
+        "build_runtime",
+        side_effect=[runtime, RuntimeError("unexpected rebuild")],
+    ) as builder, mock.patch.object(
+        hermes,
+        "install_exact_preflight",
+        return_value=None,
+    ), mock.patch.object(
+        hermes,
+        "install_auxiliary_budget",
+        return_value=None,
+    ):
+        hermes.register(first_context)
+        with mock.patch.object(
+            hermes,
+            "_acquire_profile_runtime",
+            side_effect=pause_after_acquisition,
+        ):
+            worker = threading.Thread(
+                target=lambda: _capture_registration_failure(
+                    hermes.register,
+                    second_context,
+                    failures,
+                )
+            )
+            worker.start()
+            assert first_acquired.wait(timeout=2)
+            first_context.unload_callbacks[-1]()
+            allow_second.set()
+            worker.join(timeout=2)
+
+        assert not worker.is_alive()
+        assert failures == []
+        assert second_context.calls[0][1](request={"messages": []}) is runtime()
+
+    builder.assert_called_once_with()
+    assert hermes._runtimes == {"profile-a": runtime}
+
+
+def _capture_registration_failure(
+    callback: Any,
+    context: Context,
+    failures: list[BaseException],
+) -> None:
+    """Record an unexpected thread exception for deterministic assertions."""
+
+    try:
+        callback(context)
+    except BaseException as exc:  # noqa: BLE001
+        failures.append(exc)
+
+
 def test_profile_cleanup_is_concurrently_idempotent() -> None:
     """Release exactly one owner when duplicate cleanup races without the GIL.
 
@@ -365,7 +452,7 @@ def test_register_validates_and_registers_middleware(
     preflight_cleanup = mock.Mock()
     auxiliary_cleanup = mock.Mock()
     with mock.patch.object(
-        hermes, "get_runtime", return_value=runtime
+        hermes, "build_runtime", return_value=runtime
     ), mock.patch.object(
         hermes,
         "install_exact_preflight",
@@ -406,7 +493,7 @@ def test_register_tolerates_legacy_context_without_unload_hook(
     context = LegacyContext()
     with mock.patch.object(
         hermes,
-        "get_runtime",
+        "build_runtime",
         return_value=runtime,
     ), mock.patch.object(
         hermes,
@@ -549,7 +636,7 @@ def test_register_skips_missing_cleanup_callbacks(
     context = Context()
     with mock.patch.object(
         hermes,
-        "get_runtime",
+        "build_runtime",
         return_value=runtime,
     ), mock.patch.object(
         hermes,
@@ -587,7 +674,7 @@ def test_register_rolls_back_when_auxiliary_installation_fails(
         return_value="profile-a",
     ), mock.patch.object(
         hermes,
-        "get_runtime",
+        "build_runtime",
         return_value=runtime,
     ), mock.patch.object(
         hermes,
@@ -634,7 +721,7 @@ def test_register_rolls_back_all_integrations_when_middleware_rejects(
         return_value="profile-a",
     ), mock.patch.object(
         hermes,
-        "get_runtime",
+        "build_runtime",
         return_value=runtime,
     ), mock.patch.object(
         hermes,
