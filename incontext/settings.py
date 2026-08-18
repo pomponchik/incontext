@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Type, cast
+from typing import Any, Callable, Dict, Mapping, Optional, Set, Tuple, Type, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from skelet import EnvSource, Field, Storage
@@ -297,6 +297,25 @@ def _normalized_provider_selector(value: Any) -> str:
     return "-".join(str(value or "").strip().lower().replace("_", "-").split())
 
 
+def _custom_provider_aliases(display_name: Any, provider_key: Any) -> Set[str]:
+    """Return normalized durable identities accepted by Hermes custom routes."""
+
+    aliases: Set[str] = set()
+    for value in (display_name, provider_key):
+        normalized = _normalized_provider_selector(value)
+        if not normalized:
+            continue
+        aliases.add(normalized)
+        aliases.add(
+            normalized if normalized.startswith("custom:") else f"custom:{normalized}"
+        )
+        if normalized.startswith("custom:"):
+            suffix = normalized.split(":", 1)[1]
+            if suffix:
+                aliases.update({suffix, f"custom:{normalized}"})
+    return aliases
+
+
 def _named_provider_config(
     providers: Mapping[str, Any],
     selector: str,
@@ -305,11 +324,12 @@ def _named_provider_config(
 
     target = _normalized_provider_selector(selector)
     for key, configured in providers.items():
-        key_matches = _normalized_provider_selector(key) == target
-        name_matches = isinstance(configured, Mapping) and (
-            _normalized_provider_selector(configured.get("name")) == target
+        display_name = (
+            configured.get("name")
+            if isinstance(configured, Mapping) and configured.get("name")
+            else key
         )
-        if not key_matches and not name_matches:
+        if target not in _custom_provider_aliases(display_name, key):
             continue
         if not isinstance(configured, Mapping):
             raise SettingsError("Hermes providers entry must be a mapping")
@@ -329,12 +349,10 @@ def _legacy_provider_config(
     for configured in custom_providers:
         if not isinstance(configured, Mapping):
             continue
-        candidates = (configured.get("name"), configured.get("provider_key"))
-        if target in {
-            _normalized_provider_selector(candidate)
-            for candidate in candidates
-            if candidate
-        }:
+        if target in _custom_provider_aliases(
+            configured.get("name"),
+            configured.get("provider_key"),
+        ):
             return configured
     return None
 

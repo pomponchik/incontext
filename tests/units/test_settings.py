@@ -427,6 +427,53 @@ def test_load_settings_resolves_legacy_custom_provider_route(selector: str) -> N
     assert ModernCompressor.calls[-1]["max_tokens"] == 2048
 
 
+@pytest.mark.parametrize(
+    "provider_sections",
+    [
+        {
+            "providers": {
+                "custom:edge": {"api": "https://inference.example/v1"},
+            },
+        },
+        {
+            "custom_providers": [
+                {
+                    "name": "Edge Display",
+                    "provider_key": "custom:edge",
+                    "base_url": "https://inference.example/v1",
+                },
+            ],
+        },
+    ],
+)
+def test_prefixed_custom_identity_resolves_in_both_provider_schemas(
+    provider_sections: Mapping[str, Any],
+) -> None:
+    """Accept the durable prefixed custom identity understood by Hermes.
+
+    Hermes includes ``custom:edge`` and its suffix in the alias set for both
+    modern mapping keys and legacy ``provider_key`` values.  Stripping the
+    request prefix without canonicalizing the stored identity makes a valid
+    live route fail plugin registration.
+    """
+
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": "custom:edge",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            **provider_sections,
+        },
+    )
+
+    assert result.provider == "custom"
+    assert result.base_url == "https://inference.example/v1"
+    assert "" not in settings._custom_provider_aliases("custom:", "")
+
+
 def test_legacy_custom_provider_lookup_returns_none_without_a_match() -> None:
     """Do not attach an unrelated persisted endpoint to the primary route.
 
