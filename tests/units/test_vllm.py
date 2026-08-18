@@ -578,6 +578,63 @@ def test_count_honors_extra_body_prompt_truncation_override() -> None:
     assert backend.count(request, context_length=65_536) == 30
 
 
+def test_count_does_not_cap_multimodal_prompt_after_media_expansion() -> None:
+    """Keep vLLM's final expanded count for truncated multimodal input.
+
+    vLLM applies ``truncate_prompt_tokens`` to rendered text token IDs before
+    image tokens replace their placeholders.  Therefore a 50-token text limit
+    can still produce a 120-token model prompt; applying ``min(count, 50)``
+    would over-allocate output and violate the compression window.  The
+    provider-visible ``extra_body.messages`` override is authoritative here.
+    """
+
+    backend, _ = make_backend([response(120)])
+    request = {
+        "model": "qwen",
+        "messages": [{"role": "user", "content": "superseded text"}],
+        "truncate_prompt_tokens": 50,
+        "extra_body": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {"type": "image_url", "image_url": {"url": "data:"}},
+                    ],
+                },
+            ],
+        },
+    }
+
+    assert backend.count(request, context_length=65_536) == 120
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected"),
+    [
+        ("invalid", False),
+        (["invalid", {"content": "plain"}], False),
+        ([{"content": {"image_url": "data:"}}], True),
+        ([{"content": ["invalid-part"]}], True),
+        ([{"content": [{"type": "text", "text": "plain"}]}], False),
+        ([{"content": [{"type": "input_text", "text": "plain"}]}], False),
+    ],
+)
+def test_multimodal_detection_is_conservative_for_wire_message_shapes(
+    messages: Any,
+    expected: bool,
+) -> None:
+    """Distinguish known text-only forms from media or ambiguous content.
+
+    A false negative can undercount expanded media and exceed the compression
+    boundary, while a false positive merely forgoes an optimization and keeps
+    the raw tokenizer count.  Non-message values remain the provider's
+    validation concern and do not themselves imply media expansion.
+    """
+
+    assert VllmBackend._has_multimodal_content({"messages": messages}) is expected
+
+
 def test_cached_raw_count_supports_distinct_truncation_limits() -> None:
     """Reuse one rendered count without conflating provider-visible limits.
 

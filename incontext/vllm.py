@@ -266,7 +266,39 @@ class VllmBackend(Backend):
             )
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             return None
+        if cls._has_multimodal_content(request):
+            # vLLM truncates rendered text token IDs before expanding media
+            # placeholders.  The final prompt can therefore remain larger
+            # than this textual limit; the tokenize endpoint's expanded count
+            # is the only conservative value available to this client.
+            return None
         return value
+
+    @staticmethod
+    def _has_multimodal_content(request: Dict[str, Any]) -> bool:
+        """Detect media-bearing messages in the provider-visible request."""
+
+        extra_body = request.get("extra_body")
+        messages = (
+            extra_body.get("messages", request.get("messages"))
+            if isinstance(extra_body, dict)
+            else request.get("messages")
+        )
+        if not isinstance(messages, list):
+            return False
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, dict):
+                return True
+            if isinstance(content, list) and any(
+                not isinstance(part, dict)
+                or part.get("type") not in {"text", "input_text"}
+                for part in content
+            ):
+                return True
+        return False
 
     @classmethod
     def _validate_url(cls, value: str) -> None:
