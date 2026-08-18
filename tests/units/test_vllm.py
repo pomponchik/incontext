@@ -340,6 +340,10 @@ def test_environment_supports_legacy_names() -> None:
         ({"INCONTEXT_TOKENIZER_URL": "  "}, "must not be blank"),
         ({"INCONTEXT_TOKENIZER_URL": "ftp://example.test/tokenize"}, "HTTP"),
         ({"INCONTEXT_TOKENIZER_URL": "https:///tokenize"}, "HTTP"),
+        ({"INCONTEXT_TOKENIZER_URL": "https://example.test:not-a-port"}, "valid"),
+        ({"INCONTEXT_TOKENIZER_URL": "https://example.test:65536"}, "valid"),
+        ({"INCONTEXT_TOKENIZER_URL": "https://example.test:0"}, "valid TCP"),
+        ({"INCONTEXT_TOKENIZER_URL": "https://[broken/tokenize"}, "valid"),
         (
             {"INCONTEXT_TOKENIZER_URL": "https://user:pass@example.test/tokenize"},
             "credentials",
@@ -380,9 +384,11 @@ def test_backend_rejects_unsafe_environment(
 
 
 def test_backend_accepts_http_url_with_query() -> None:
+    """Accept ordinary HTTP transport components after strict validation."""
+
     backend, _ = make_backend(
         environment={
-            "INCONTEXT_TOKENIZER_URL": "http://127.0.0.1/tokenize?mode=1",
+            "INCONTEXT_TOKENIZER_URL": "http://127.0.0.1:8080/tokenize?mode=1",
         },
     )
     assert backend._environment.tokenizer_url.endswith("?mode=1")

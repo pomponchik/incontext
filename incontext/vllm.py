@@ -249,10 +249,20 @@ class VllmBackend(Backend):
 
     @classmethod
     def _validate_url(cls, value: str) -> None:
-        parsed = urlsplit(value)
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except ValueError as exc:
+            raise cls.VllmBackendError(
+                "tokenizer_url must contain a valid HTTP(S) URL",
+            ) from exc
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise cls.VllmBackendError(
                 "tokenizer_url must contain an HTTP(S) URL",
+            )
+        if port is not None and port <= 0:
+            raise cls.VllmBackendError(
+                "tokenizer_url must contain a valid TCP port",
             )
         if parsed.username is not None or parsed.password is not None:
             raise cls.VllmBackendError(
