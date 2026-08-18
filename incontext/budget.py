@@ -36,17 +36,17 @@ def compute_max_tokens(
     return remaining if remaining > 0 else None
 
 
-def _requested_output_cap(request: dict[str, Any]) -> int | None:
-    """Return the smallest valid output cap already requested by the caller."""
+def _requested_output_cap(request: dict[str, Any]) -> tuple[str, int] | None:
+    """Return the field and smallest valid cap requested by the caller."""
 
     caps = [
-        value
+        (field, value)
         for field in OUTPUT_BUDGET_FIELDS
         if not isinstance((value := request.get(field)), bool)
         and isinstance(value, int)
         and value > 0
     ]
-    return min(caps) if caps else None
+    return min(caps, key=lambda item: item[1]) if caps else None
 
 
 def estimate_request_tokens_rough(request: dict[str, Any]) -> int:
@@ -152,12 +152,14 @@ class DynamicOutputBudget:
             )
             return None
         requested_output_cap = _requested_output_cap(request)
+        output_field = "max_tokens"
         if requested_output_cap is not None:
-            dynamic_max_tokens = min(dynamic_max_tokens, requested_output_cap)
+            output_field, requested_cap = requested_output_cap
+            dynamic_max_tokens = min(dynamic_max_tokens, requested_cap)
         rewritten = dict(request)
         for key in OUTPUT_BUDGET_FIELDS:
             rewritten.pop(key, None)
-        rewritten["max_tokens"] = dynamic_max_tokens
+        rewritten[output_field] = dynamic_max_tokens
 
         LOGGER.info(
             "incontext model=%s source=%s prompt_tokens=%d "

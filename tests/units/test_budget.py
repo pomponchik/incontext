@@ -175,6 +175,42 @@ def test_runtime_uses_all_free_space_without_an_existing_output_cap(
 
 
 @pytest.mark.parametrize(
+    "field",
+    ["max_tokens", "max_completion_tokens", "max_output_tokens"],
+)
+def test_runtime_preserves_the_provider_selected_output_field(field: str) -> None:
+    """Keep Hermes' provider-specific wire parameter while lowering its cap.
+
+    Hermes chooses the output field before invoking request middleware.  Newer
+    OpenAI-family models reject legacy ``max_tokens``, while other transports
+    use their own alias; replacing the chosen name can turn a valid request into
+    HTTP 400 even when the numeric dynamic budget is correct.
+    """
+
+    runtime_settings = Settings(
+        model_name="qwen",
+        context_length=65_536,
+        compression_window=55_705,
+        fallback_margin_tokens=1024,
+    )
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(50_000))
+
+    result = runtime(
+        request={
+            "model": "qwen",
+            "messages": [],
+            field: 8192,
+        },
+    )
+
+    assert result is not None
+    assert result["request"][field] == 5705
+    assert set(result["request"]).isdisjoint(
+        set(budget.OUTPUT_BUDGET_FIELDS) - {field},
+    )
+
+
+@pytest.mark.parametrize(
     "invalid_cap",
     [None, True, False, 0, -1, 1.5, "2048"],
 )

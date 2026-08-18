@@ -195,9 +195,10 @@ settings object contains only the compression-window and fallback-budget policy.
 - With the bundled backend, vLLM applies its real chat template to messages, tools, and
   `chat_template_kwargs`; local tokenizer approximations are not used.
 - The returned `max_model_len` must equal Hermes' configured context length.
-- `max_tokens`, `max_completion_tokens`, and `max_output_tokens` are normalized
-  to one unambiguous `max_tokens` field only when a positive output budget is
-  available; a full compression window is handed to preflight compression.
+- `max_tokens`, `max_completion_tokens`, and `max_output_tokens` are reduced to
+  the smallest positive caller cap while preserving the corresponding
+  provider-selected field name; a full compression window is handed to
+  preflight compression.
 - The incoming request is copied and never mutated.
 - Exact counts use a bounded, thread-safe cache.
 - The exact counter is also used by Hermes' preflight compressor, eliminating
