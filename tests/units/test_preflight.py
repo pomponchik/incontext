@@ -484,3 +484,32 @@ def test_install_reports_absent_hermes(caplog: pytest.LogCaptureFixture) -> None
         if turn_context is not None:
             sys.modules["agent.turn_context"] = turn_context
     assert "Hermes is not installed" in caplog.text
+
+
+def test_partial_install_leaves_first_binding_when_second_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Keep the two-module preflight monkeypatch installation transactional.
+
+    Hermes private APIs can move one imported binding before the other.  If the
+    second binding is unavailable, installation must not replace or acquire an
+    owner for the first one; registration cannot clean up an acquisition for
+    which ``install`` never returned a callback.
+    """
+
+    def rough(
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+    ) -> int:
+        del messages, system_prompt, tools
+        return 5
+
+    loop, turn_context = install_fake_hermes(monkeypatch, rough)
+    del loop.estimate_request_tokens_rough
+
+    assert install(runtime(Counter(100))) is None
+    assert turn_context.estimate_request_tokens_rough is rough
+    assert "estimator API changed" in caplog.text
