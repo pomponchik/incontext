@@ -336,6 +336,123 @@ def test_load_settings_uses_effective_named_custom_route() -> None:
 
 
 @pytest.mark.parametrize(
+    ("selector", "providers"),
+    [
+        (
+            "local",
+            {
+                "local": {
+                    "api": "https://inference.example/v1",
+                    "default_model": "qwen-test",
+                },
+            },
+        ),
+        (
+            "custom:local-display",
+            {
+                "unrelated": {"api": "https://unrelated.invalid/v1"},
+                "local-key": {
+                    "name": "Local Display",
+                    "api": "https://inference.example/v1",
+                    "default_model": "qwen-test",
+                },
+            },
+        ),
+    ],
+)
+def test_load_settings_matches_all_hermes_named_provider_selectors(
+    selector: str,
+    providers: Mapping[str, Any],
+) -> None:
+    """Scope budgeting to the canonical runtime identity of a named provider.
+
+    Hermes accepts a providers mapping key, its normalized display name, and
+    the ``custom:<name>`` menu spelling.  All resolve to live provider
+    ``custom`` before middleware and auxiliary builders run.  Retaining a
+    selector literal makes both route guards reject the actual primary route.
+    """
+
+    result = load(
+        config={
+            **base_config,
+            "model": {
+                "default": "qwen-test",
+                "provider": selector,
+                "context_length": 65_536,
+            },
+            "providers": providers,
+        },
+    )
+
+    assert result.provider == "custom"
+    assert result.base_url == "https://inference.example/v1"
+
+
+@pytest.mark.parametrize(
+    ("provider_entry", "model_base_url"),
+    [
+        ({"api": "https://inference.example/v1"}, "https://stale.invalid/v1"),
+        ({"url": "https://inference.example/v1"}, None),
+        ({"base_url": "https://inference.example/v1"}, None),
+    ],
+)
+def test_named_provider_uses_hermes_effective_endpoint(
+    provider_entry: Mapping[str, Any],
+    model_base_url: str | None,
+) -> None:
+    """Use the endpoint selected by Hermes' named-provider resolver.
+
+    Once a named entry is selected, Hermes accepts its ``api``, ``url``, and
+    ``base_url`` aliases and does not revive a stale model-level URL.  Diverging
+    either disables budgeting on the primary route or removes the URL guard and
+    permits the primary tokenizer on an unrelated custom fallback.
+    """
+
+    model: dict[str, Any] = {
+        "default": "qwen-test",
+        "provider": "custom:local",
+        "context_length": 65_536,
+    }
+    if model_base_url is not None:
+        model["base_url"] = model_base_url
+
+    result = load(
+        config={
+            **base_config,
+            "model": model,
+            "providers": {
+                "local": {
+                    **provider_entry,
+                    "default_model": "qwen-test",
+                },
+            },
+        },
+    )
+
+    assert result.base_url == "https://inference.example/v1"
+
+
+@pytest.mark.parametrize("alias", ["vllm", "ollama", "llamacpp"])
+def test_load_settings_uses_live_identity_for_local_provider_alias(alias: str) -> None:
+    """Canonicalize Hermes local-provider aliases before route scoping.
+
+    Hermes maps its local runtime aliases to the live provider label ``custom``
+    before invoking request middleware.  Keeping the configured alias would
+    silently disable exact budgeting even though the endpoint and model match.
+    """
+
+    result = load(
+        config={
+            **base_config,
+            "model": {**base_config["model"], "provider": alias},
+        },
+    )
+
+    assert result.provider == "custom"
+    assert result.base_url == "https://inference.example/v1"
+
+
+@pytest.mark.parametrize(
     "config",
     [
         {
@@ -350,6 +467,11 @@ def test_load_settings_uses_effective_named_custom_route() -> None:
         {
             **base_config,
             "providers": {"custom": "invalid"},
+        },
+        {
+            **base_config,
+            "model": {**base_config["model"], "provider": "custom:local"},
+            "providers": {"local": "invalid"},
         },
     ],
 )
@@ -366,6 +488,25 @@ def test_load_settings_rejects_invalid_provider_route_configuration(
 
     with pytest.raises(settings.SettingsError, match="provider"):
         load(config=config)
+
+
+def test_load_settings_preserves_nonlocal_builtin_provider() -> None:
+    """Leave ordinary Hermes provider identities unchanged during scoping.
+
+    Only named custom profiles and documented local-runtime aliases canonicalize
+    to ``custom``.  A built-in provider without a matching profiles entry must
+    retain its live middleware label while still using the configured model URL.
+    """
+
+    result = load(
+        config={
+            **base_config,
+            "model": {**base_config["model"], "provider": "openai"},
+        },
+    )
+
+    assert result.provider == "openai"
+    assert result.base_url == "https://inference.example/v1"
 
 
 def test_load_settings_passes_modern_compression_options() -> None:

@@ -278,40 +278,73 @@ def _effective_compression_threshold(
     )
 
 
+def _normalized_provider_selector(value: Any) -> str:
+    """Normalize the menu spelling Hermes uses for named providers."""
+
+    return "-".join(str(value or "").strip().lower().replace("_", "-").split())
+
+
+def _named_provider_config(
+    providers: Mapping[str, Any],
+    selector: str,
+) -> Optional[Mapping[str, Any]]:
+    """Find a providers entry by mapping key or normalized display name."""
+
+    target = _normalized_provider_selector(selector)
+    for key, configured in providers.items():
+        key_matches = _normalized_provider_selector(key) == target
+        name_matches = isinstance(configured, Mapping) and (
+            _normalized_provider_selector(configured.get("name")) == target
+        )
+        if not key_matches and not name_matches:
+            continue
+        if not isinstance(configured, Mapping):
+            raise SettingsError("Hermes providers entry must be a mapping")
+        return configured
+    return None
+
+
 def _effective_provider_route(
     model: Mapping[str, Any],
     providers: Mapping[str, Any],
 ) -> Tuple[str, str, Mapping[str, Any]]:
     """Resolve Hermes' selector into its live provider and endpoint identity."""
 
-    provider_selector = str(model.get("provider") or "").strip().lower()
+    provider_selector = _normalized_provider_selector(model.get("provider"))
     provider = provider_selector
     provider_config: Mapping[str, Any] = {}
+    named = False
     if ":" in provider_selector:
-        provider, provider_name = provider_selector.split(":", 1)
-        configured_provider = providers.get(provider_name)
-        if (
-            not provider
-            or not provider_name
-            or not isinstance(
-                configured_provider,
-                Mapping,
-            )
-        ):
+        provider_prefix, provider_name = provider_selector.split(":", 1)
+        configured_provider = _named_provider_config(providers, provider_name)
+        if not provider_prefix or not provider_name or configured_provider is None:
             raise SettingsError(
                 "Hermes named model.provider must reference providers.<name>",
             )
+        provider = "custom"
         provider_config = configured_provider
+        named = True
+    elif provider_selector not in {"", "custom"}:
+        configured_provider = _named_provider_config(providers, provider_selector)
+        if configured_provider is not None:
+            provider = "custom"
+            provider_config = configured_provider
+            named = True
+        elif provider_selector in {"vllm", "ollama", "llamacpp"}:
+            provider = "custom"
     else:
         configured_provider = providers.get(provider)
         if configured_provider is not None:
             if not isinstance(configured_provider, Mapping):
                 raise SettingsError("Hermes providers entry must be a mapping")
             provider_config = configured_provider
+    provider_endpoint = (
+        provider_config.get("api")
+        or provider_config.get("url")
+        or provider_config.get("base_url")
+    )
     base_url = normalize_base_url(
-        model.get("base_url")
-        or provider_config.get("api")
-        or provider_config.get("base_url"),
+        provider_endpoint if named else model.get("base_url") or provider_endpoint,
     )
     return provider, base_url, provider_config
 
