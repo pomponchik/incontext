@@ -199,6 +199,16 @@ def load_settings(
         "Hermes model.context_length",
         minimum=1,
     )
+    configured_max_tokens = model.get("max_tokens")
+    max_tokens = (
+        None
+        if configured_max_tokens is None
+        else _strict_int(
+            configured_max_tokens,
+            "Hermes model.max_tokens",
+            minimum=1,
+        )
+    )
     threshold = _strict_float(
         compression.get("threshold", 0.50),
         "Hermes compression.threshold",
@@ -223,7 +233,7 @@ def load_settings(
                 "config_context_length": context_length,
                 "provider": str(model.get("provider") or ""),
                 "api_mode": str(model.get("api_mode") or ""),
-                "max_tokens": None,
+                "max_tokens": max_tokens,
                 "model_thresholds": _normalized_model_thresholds(
                     compression.get("model_thresholds"),
                 ),

@@ -242,6 +242,44 @@ def test_load_settings_passes_modern_compression_options() -> None:
     assert call["threshold_tokens_cap"] == 50_000
 
 
+def test_load_settings_reserves_hermes_configured_output_budget() -> None:
+    """Reconstruct the same compression boundary as the live Hermes agent.
+
+    Hermes passes ``model.max_tokens`` to ``ContextCompressor`` because the
+    configured completion allowance reduces the safe pre-compression input
+    threshold.  Dropping that value here produces a larger, fictitious window
+    and lets incontext budget requests beyond Hermes' actual boundary.
+    """
+
+    ModernCompressor.calls.clear()
+    config = {
+        **base_config,
+        "model": {**base_config["model"], "max_tokens": "8192"},
+    }
+
+    load(config=config)
+
+    assert ModernCompressor.calls[-1]["max_tokens"] == 8192
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, "invalid"])
+def test_load_settings_rejects_invalid_hermes_output_budget(value: Any) -> None:
+    """Reject malformed output reserves before deriving a false window.
+
+    Values that Hermes cannot interpret as a positive token allowance must not
+    be silently converted into a different compression threshold by incontext.
+    The validation mirrors the strict integer rules used for context length.
+    """
+
+    config = {
+        **base_config,
+        "model": {**base_config["model"], "max_tokens": value},
+    }
+
+    with pytest.raises(settings.SettingsError, match=r"model\.max_tokens"):
+        load(config=config)
+
+
 def test_load_settings_explicit_window_avoids_compressor_construction() -> None:
     class MustNotRun:
         def __init__(self, **kwargs: Any) -> None:
