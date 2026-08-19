@@ -820,12 +820,14 @@ def test_stale_auxiliary_cleanup_cannot_remove_a_new_installation(
 
     Force rediscovery can replace the module binding and establish a new owner
     before an older manager disposes its ledger.  The stale callback must not
-    decrement or restore the new installation's reference count.
+    decrement or restore the new installation's reference count, but it must
+    still release its own owner and restore its now-detached module.
     """
 
-    _, _ = install_fake_hermes(monkeypatch)
+    stale_auxiliary, stale_original = install_fake_hermes(monkeypatch)
     stale_cleanup = install(runtime(Counter(100)))
     assert callable(stale_cleanup)
+    stale_wrapper = stale_auxiliary._build_call_kwargs  # type: ignore[attr-defined]
 
     second_auxiliary, _ = install_fake_hermes(monkeypatch)
     active_cleanup = install(runtime(Counter(200)))
@@ -833,6 +835,8 @@ def test_stale_auxiliary_cleanup_cannot_remove_a_new_installation(
     active_wrapper = second_auxiliary._build_call_kwargs  # type: ignore[attr-defined]
 
     stale_cleanup()
+    assert not stale_wrapper.owned
+    assert stale_auxiliary._build_call_kwargs is stale_original  # type: ignore[attr-defined]
     assert second_auxiliary._build_call_kwargs is active_wrapper  # type: ignore[attr-defined]
 
 

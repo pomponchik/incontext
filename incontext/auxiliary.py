@@ -251,12 +251,11 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
             if closed:
                 return
             closed = True
-            if _installed_wrapper is not wrapper:
-                return
             wrapper.release(owner)
             if not wrapper.owned:
                 if auxiliary_client.__dict__.get("_build_call_kwargs") is wrapper:
                     auxiliary_client.__dict__["_build_call_kwargs"] = wrapper.original
-                _installed_wrapper = None
+                if _installed_wrapper is wrapper:
+                    _installed_wrapper = None
 
     return cleanup
