@@ -729,6 +729,13 @@ def test_backend_accepts_http_url_with_query() -> None:
 
 
 def test_backend_accepts_an_injected_environment() -> None:
+    """Retain an immutable configuration snapshot for cache correctness.
+
+    The cache key deliberately omits transport configuration.  Because the
+    backend keeps an injected skelet storage by reference, its tokenizer URL
+    must remain read-only or cached counts could outlive an endpoint change.
+    """
+
     with patch.dict(
         "os.environ",
         {"INCONTEXT_TOKENIZER_URL": "https://injected.test/tokenize"},
@@ -737,6 +744,8 @@ def test_backend_accepts_an_injected_environment() -> None:
         environment = VllmEnvironment()
     backend = VllmBackend(environment=environment, opener=RecordingOpener([]))
     assert backend._environment is environment
+    with pytest.raises(AttributeError, match="read-only"):
+        environment.tokenizer_url = "https://different.test/tokenize"
 
 
 def test_backend_sends_exact_request_and_caches_result() -> None:
