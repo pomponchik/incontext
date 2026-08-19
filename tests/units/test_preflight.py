@@ -860,15 +860,24 @@ def test_install_reports_absent_hermes(caplog: pytest.LogCaptureFixture) -> None
     assert "Hermes is not installed" in caplog.text
 
 
-def test_install_leaves_no_wrapper_when_the_private_binding_is_missing(
+@pytest.mark.parametrize(
+    ("missing_binding", "remaining_binding"),
+    [
+        ("estimate_request_tokens_rough", "_should_run_preflight_estimate"),
+        ("_should_run_preflight_estimate", "estimate_request_tokens_rough"),
+    ],
+)
+def test_install_leaves_no_wrapper_when_a_private_binding_is_missing(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    missing_binding: str,
+    remaining_binding: str,
 ) -> None:
     """Leave Hermes unchanged when its private preflight API has moved.
 
     A release may remove or rename the proactive estimator before incontext is
-    updated.  Registration must fail open before acquiring an owner because it
-    cannot clean up an installation for which no callback was returned.
+    updated.  Registration must fail open before changing either binding or
+    acquiring an owner because it cannot clean up a partial installation.
     """
 
     def rough(
@@ -881,8 +890,10 @@ def test_install_leaves_no_wrapper_when_the_private_binding_is_missing(
         return 5
 
     _, turn_context = install_fake_hermes(monkeypatch, rough)
-    del turn_context.estimate_request_tokens_rough
+    original_remaining = turn_context.__dict__[remaining_binding]
+    del turn_context.__dict__[missing_binding]
 
     assert install(runtime(Counter(100))) is None
-    assert not hasattr(turn_context, "estimate_request_tokens_rough")
+    assert missing_binding not in turn_context.__dict__
+    assert turn_context.__dict__[remaining_binding] is original_remaining
     assert "estimator API changed" in caplog.text
