@@ -185,25 +185,11 @@ class DynamicOutputBudget:
             self.settings.compression_window,
             prompt_tokens,
             safety_margin,
+            source,
         )
         if resolved_budget is None:
-            # The exact preflight installed during plugin registration sees
-            # this condition before Hermes builds the provider request and
-            # starts compression.  Keep this middleware fail-open as a second
-            # line of defence for requests from call sites that bypass that
-            # preflight: an invalid sentinel cap would otherwise cause Hermes
-            # to retry the same context error instead of compacting history.
-            LOGGER.warning(
-                "incontext model=%s source=%s prompt_tokens=%d "
-                "compression_window=%d action=requires_compression",
-                request.get("model") or "unknown",
-                source,
-                prompt_tokens,
-                self.settings.compression_window,
-            )
             return None
         output_field, dynamic_max_tokens = resolved_budget
-        output_field = self.backend.output_budget_field(output_field)
         rewritten = dict(request)
         for key in OUTPUT_BUDGET_FIELDS:
             rewritten.pop(key, None)
@@ -239,31 +225,55 @@ class DynamicOutputBudget:
         compression_window: int,
         prompt_tokens: int,
         safety_margin: int,
+        source: str,
     ) -> Optional[Tuple[str, int]]:
         """Combine the window, caller cap, and backend wire constraint."""
 
-        dynamic_max_tokens = compute_max_tokens(
-            compression_window,
-            prompt_tokens,
-            safety_margin=safety_margin,
-        )
-        if dynamic_max_tokens is None:
+        try:
+            dynamic_max_tokens = compute_max_tokens(
+                compression_window,
+                prompt_tokens,
+                safety_margin=safety_margin,
+            )
+            output_field = "max_tokens"
+            if dynamic_max_tokens is not None:
+                requested_output_cap = _requested_output_cap(
+                    request,
+                    self.backend.coerce_output_budget,
+                )
+                if requested_output_cap is not None:
+                    output_field, requested_cap = requested_output_cap
+                    dynamic_max_tokens = min(dynamic_max_tokens, requested_cap)
+                provider_limit = self.backend.output_budget_limit(
+                    request,
+                    context_length=self.settings.context_length,
+                )
+                if provider_limit is not None:
+                    dynamic_max_tokens = min(dynamic_max_tokens, provider_limit)
+                output_field = self.backend.output_budget_field(output_field)
+        except Exception as backend_error:  # noqa: BLE001
+            LOGGER.warning(
+                "incontext backend_contract_failed type=%s; request unchanged",
+                type(backend_error).__name__,
+            )
             return None
-        output_field = "max_tokens"
-        requested_output_cap = _requested_output_cap(
-            request,
-            self.backend.coerce_output_budget,
-        )
-        if requested_output_cap is not None:
-            output_field, requested_cap = requested_output_cap
-            dynamic_max_tokens = min(dynamic_max_tokens, requested_cap)
-        provider_limit = self.backend.output_budget_limit(
-            request,
-            context_length=self.settings.context_length,
-        )
-        if provider_limit is not None:
-            dynamic_max_tokens = min(dynamic_max_tokens, provider_limit)
-        return (output_field, dynamic_max_tokens) if dynamic_max_tokens > 0 else None
+        if dynamic_max_tokens is None or dynamic_max_tokens <= 0:
+            # The exact preflight installed during plugin registration sees
+            # this condition before Hermes builds the provider request and
+            # starts compression.  Keep this middleware fail-open as a second
+            # line of defence for requests from call sites that bypass that
+            # preflight: an invalid sentinel cap would otherwise cause Hermes
+            # to retry the same context error instead of compacting history.
+            LOGGER.warning(
+                "incontext model=%s source=%s prompt_tokens=%d "
+                "compression_window=%d action=requires_compression",
+                request.get("model") or "unknown",
+                source,
+                prompt_tokens,
+                self.settings.compression_window,
+            )
+            return None
+        return output_field, dynamic_max_tokens
 
     def _matches_route(
         self,

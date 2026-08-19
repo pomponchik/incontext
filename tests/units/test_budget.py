@@ -493,6 +493,44 @@ def test_runtime_uses_backend_supported_output_budget_field() -> None:
     assert "max_output_tokens" not in result["request"]
 
 
+@pytest.mark.parametrize(
+    "failing_hook",
+    [
+        "coerce_output_budget",
+        "output_budget_limit",
+        "output_budget_field",
+    ],
+)
+def test_runtime_fails_open_when_a_backend_contract_hook_fails(
+    runtime_settings: Settings,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_hook: str,
+) -> None:
+    """Keep Hermes running when any third-party backend hook fails.
+
+    Token counting is not the backend's only extension point: provider-specific
+    cap coercion, limits, and output-field selection also execute inside
+    middleware.  An exception from any of them must leave the caller's request
+    untouched and must not expose provider details through logs.
+    """
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise RuntimeError("secret provider detail")
+
+    request = {"model": "qwen", "messages": [], "max_tokens": 100}
+    backend = Counter(100)
+    monkeypatch.setattr(backend, failing_hook, fail)
+    runtime = budget.DynamicOutputBudget(runtime_settings, backend)
+
+    with caplog.at_level(logging.WARNING):
+        assert runtime(request=request) is None
+    assert request == {"model": "qwen", "messages": [], "max_tokens": 100}
+    assert "RuntimeError" in caplog.text
+    assert "secret provider detail" not in caplog.text
+
+
 def test_runtime_removes_extra_body_output_cap_override() -> None:
     """Prevent OpenAI's ``extra_body`` merge from undoing the dynamic budget.
 
