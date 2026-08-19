@@ -70,12 +70,12 @@ def install_fake_hermes(
 def test_install_replaces_rough_preflight_with_exact_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Patch every Hermes binding and count the complete provider prompt.
+    """Patch proactive compression and count the complete provider prompt.
 
-    Hermes imports the rough estimator into both ``turn_context`` (the actual
-    proactive compression gate) and ``conversation_loop`` (later recovery and
-    accounting paths).  The wrapper must replace both copies and include the
-    separately supplied system prompt in the exact vLLM chat payload.
+    ``turn_context`` owns the primary-route compression gate.  Later recovery
+    paths may already have switched to a fallback route, so their imported
+    estimator must remain untouched rather than use the primary tokenizer.
+    The proactive wrapper still includes the separately supplied system prompt.
     """
 
     def rough(
@@ -91,24 +91,16 @@ def test_install_replaces_rough_preflight_with_exact_backend(
     cleanup = install(runtime(counter))
 
     assert callable(cleanup)
-    for module in (loop, turn_context):
-        assert (
-            module.estimate_request_tokens_rough(
-                [{"role": "user", "content": "large"}],
-                system_prompt="Follow the policy",
-                tools=[{"type": "function"}],
-            )
-            == 64_000
+    assert loop.estimate_request_tokens_rough is rough
+    assert (
+        turn_context.estimate_request_tokens_rough(
+            [{"role": "user", "content": "large"}],
+            system_prompt="Follow the policy",
+            tools=[{"type": "function"}],
         )
+        == 64_000
+    )
     assert counter.requests == [
-        {
-            "model": "qwen-test",
-            "messages": [
-                {"role": "system", "content": "Follow the policy"},
-                {"role": "user", "content": "large"},
-            ],
-            "tools": [{"type": "function"}],
-        },
         {
             "model": "qwen-test",
             "messages": [
@@ -150,6 +142,53 @@ def test_install_patches_the_turn_context_binding_used_for_compression(
         )
         == 123
     )
+
+
+def test_preflight_counts_provider_visible_api_content_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Count Hermes' API-bound sidecar rather than its clean stored content.
+
+    Hermes persists clean conversation text beside an exact ``api_content``
+    sidecar and substitutes that sidecar only while building the provider
+    request.  vLLM ignores the private field, so forwarding both values would
+    undercount injected memory or plugin context and skip compression.  The
+    preflight copy must mirror substitution while preserving retry-owned input.
+    """
+
+    messages = [
+        {
+            "role": "user",
+            "content": "clean",
+            "api_content": "provider-visible context",
+        },
+        {
+            "role": "system",
+            "content": "policy",
+            "api_content": "must not replace a system message",
+        },
+        "provider-invalid",
+    ]
+    _, turn_context = install_fake_hermes(
+        monkeypatch,
+        lambda messages, *, system_prompt="", tools=None: 1,
+    )
+    counter = Counter(321)
+    install(runtime(counter))
+
+    assert turn_context.estimate_request_tokens_rough(messages) == 321
+    assert counter.requests == [
+        {
+            "model": "qwen-test",
+            "messages": [
+                {"role": "user", "content": "provider-visible context"},
+                {"role": "system", "content": "policy"},
+                "provider-invalid",
+            ],
+        },
+    ]
+    assert messages[0]["content"] == "clean"
+    assert messages[0]["api_content"] == "provider-visible context"
 
 
 def test_install_forces_exact_preflight_before_message_only_gate(
@@ -329,14 +368,14 @@ def test_exact_gate_resolves_profile_runtime_at_call_time() -> None:
 def test_preflight_preserves_empty_tool_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loop, _ = install_fake_hermes(
+    _, turn_context = install_fake_hermes(
         monkeypatch,
         lambda messages, *, system_prompt="", tools=None: 42,
     )
     counter = Counter(123)
     install(runtime(counter))
 
-    assert loop.estimate_request_tokens_rough([]) == 123
+    assert turn_context.estimate_request_tokens_rough([]) == 123
     assert counter.requests == [{"model": "qwen-test", "messages": []}]
 
 
@@ -364,11 +403,11 @@ def test_preflight_falls_back_when_backend_fails(
         assert tools == []
         return 321
 
-    loop, _ = install_fake_hermes(monkeypatch, rough)
+    _, turn_context = install_fake_hermes(monkeypatch, rough)
     install(runtime(Counter(TimeoutError("secret"))))
 
     assert (
-        loop.estimate_request_tokens_rough(
+        turn_context.estimate_request_tokens_rough(
             [{"role": "user", "content": "fallback"}],
             system_prompt="system fallback",
             tools=[],
@@ -393,10 +432,10 @@ def test_preflight_falls_back_for_unsupported_message_shape(
         assert tools == "also-not-a-list"
         return 7
 
-    loop, _ = install_fake_hermes(monkeypatch, rough)
+    _, turn_context = install_fake_hermes(monkeypatch, rough)
     install(runtime(Counter(1)))
     assert (
-        loop.estimate_request_tokens_rough(
+        turn_context.estimate_request_tokens_rough(
             "not-a-list",
             tools="also-not-a-list",
         )
@@ -457,14 +496,14 @@ def test_install_is_idempotent_and_retains_the_initial_fallback(
     ) -> int:
         return 5
 
-    loop, _ = install_fake_hermes(monkeypatch, rough)
+    _, turn_context = install_fake_hermes(monkeypatch, rough)
     first = Counter(100)
     second = Counter(200)
     first_cleanup = install(runtime(first))
     second_cleanup = install(runtime(second))
     assert callable(first_cleanup)
     assert callable(second_cleanup)
-    assert loop.estimate_request_tokens_rough([]) == 200
+    assert turn_context.estimate_request_tokens_rough([]) == 200
     assert first.requests == []
     assert second.requests == [{"model": "qwen-test", "messages": []}]
 
@@ -472,11 +511,11 @@ def test_install_is_idempotent_and_retains_the_initial_fallback(
 def test_cleanup_restores_all_preflight_bindings_after_final_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reference-count profile owners and restore only unchanged bindings.
+    """Reference-count profile owners and restore the proactive binding.
 
-    Both Hermes modules hold independent imported estimator names.  With two
-    active profile managers, the first unload must leave both wrappers intact;
-    the final unload restores each original and a duplicate callback is a no-op.
+    With two active profile managers, the first unload must leave the shared
+    proactive wrapper intact; the final unload restores the original and a
+    duplicate callback remains a no-op.
     """
 
     def rough(
@@ -488,21 +527,18 @@ def test_cleanup_restores_all_preflight_bindings_after_final_owner(
         del messages, system_prompt, tools
         return 5
 
-    loop, turn_context = install_fake_hermes(monkeypatch, rough)
+    _, turn_context = install_fake_hermes(monkeypatch, rough)
     first_cleanup = install(runtime(Counter(100)))
     second_cleanup = install(runtime(Counter(200)))
     assert callable(first_cleanup)
     assert callable(second_cleanup)
-    loop_wrapper = loop.estimate_request_tokens_rough
     turn_wrapper = turn_context.estimate_request_tokens_rough
 
     first_cleanup()
-    assert loop.estimate_request_tokens_rough is loop_wrapper
     assert turn_context.estimate_request_tokens_rough is turn_wrapper
 
     second_cleanup()
     second_cleanup()
-    assert loop.estimate_request_tokens_rough is rough
     assert turn_context.estimate_request_tokens_rough is rough
 
 
@@ -584,8 +620,8 @@ def test_install_snapshot_is_serialized_with_final_owner_cleanup(
 def test_preflight_runtime_resolver_tracks_the_active_profile() -> None:
     """Obtain the profile-specific backend for every preflight estimate.
 
-    Hermes keeps one pair of imported estimator bindings process-wide while its
-    active home is ContextVar-scoped.  Resolving lazily ensures the wrapper uses
+    Hermes keeps the imported proactive estimator process-wide while its active
+    home is ContextVar-scoped.  Resolving lazily ensures the wrapper uses
     the runtime belonging to the profile that initiated this particular turn.
     """
 
@@ -706,9 +742,9 @@ def test_cleanup_never_overwrites_later_preflight_bindings(
 ) -> None:
     """Preserve another plugin's estimator replacement during unload.
 
-    Cleanup owns only the exact wrapper objects it installed.  If either Hermes
-    module receives a later replacement, unloading incontext must leave that
-    callable intact while restoring only bindings that still belong to it.
+    Cleanup owns only the exact wrapper object it installed.  If another plugin
+    replaces that Hermes binding later, unloading incontext must leave the
+    foreign callable intact.
     """
 
     def rough(
@@ -740,63 +776,14 @@ def test_cleanup_never_overwrites_later_preflight_bindings(
     assert turn_context.estimate_request_tokens_rough is replacement
 
 
-def test_partial_foreign_replacement_keeps_each_preflight_owner_isolated(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Track ownership independently for both imported Hermes bindings.
-
-    Another plugin may replace only one of Hermes' two estimator copies after
-    profile A loads.  Loading and then unloading profile B must restore that
-    foreign replacement on the changed module while retaining A's still-owned
-    wrapper on the untouched module.  A single tuple-wide refcount previously
-    forgot A and removed its live wrapper during B's unload.
-    """
-
-    def rough(
-        messages: Any,
-        *,
-        system_prompt: str = "",
-        tools: Any = None,
-    ) -> int:
-        del messages, system_prompt, tools
-        return 5
-
-    loop, turn_context = install_fake_hermes(monkeypatch, rough)
-    first_cleanup = install(runtime(Counter(100)))
-    assert callable(first_cleanup)
-
-    def replacement(
-        messages: Any,
-        *,
-        system_prompt: str = "",
-        tools: Any = None,
-    ) -> int:
-        del messages, system_prompt, tools
-        return 99
-
-    turn_context.estimate_request_tokens_rough = replacement  # type: ignore[attr-defined]
-    second_cleanup = install(runtime(Counter(200)))
-    assert callable(second_cleanup)
-    assert loop.estimate_request_tokens_rough([]) == 200
-    assert turn_context.estimate_request_tokens_rough([]) == 200
-
-    second_cleanup()
-    assert loop.estimate_request_tokens_rough([]) == 100
-    assert turn_context.estimate_request_tokens_rough is replacement
-
-    first_cleanup()
-    assert loop.estimate_request_tokens_rough is rough
-    assert turn_context.estimate_request_tokens_rough is replacement
-
-
 def test_stale_preflight_cleanup_cannot_remove_new_installation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Ignore cleanup from a manager superseded by force rediscovery.
 
-    A new pair of module bindings can become active before an older profile
-    manager runs its unload ledger.  The old callback must recognize that its
-    wrapper tuple is stale and leave the replacement installation untouched.
+    A new module binding can become active before an older profile manager runs
+    its unload ledger.  The old callback must recognize that its wrapper is
+    stale and leave the replacement installation untouched.
     """
 
     def rough(
@@ -812,13 +799,13 @@ def test_stale_preflight_cleanup_cannot_remove_new_installation(
     stale_cleanup = install(runtime(Counter(100)))
     assert callable(stale_cleanup)
 
-    second_loop, _ = install_fake_hermes(monkeypatch, rough)
+    _, second_turn_context = install_fake_hermes(monkeypatch, rough)
     active_cleanup = install(runtime(Counter(200)))
     assert callable(active_cleanup)
-    active_wrapper = second_loop.estimate_request_tokens_rough
+    active_wrapper = second_turn_context.estimate_request_tokens_rough
 
     stale_cleanup()
-    assert second_loop.estimate_request_tokens_rough is active_wrapper
+    assert second_turn_context.estimate_request_tokens_rough is active_wrapper
 
 
 def test_install_reports_absent_hermes(caplog: pytest.LogCaptureFixture) -> None:
@@ -837,16 +824,15 @@ def test_install_reports_absent_hermes(caplog: pytest.LogCaptureFixture) -> None
     assert "Hermes is not installed" in caplog.text
 
 
-def test_partial_install_leaves_first_binding_when_second_is_missing(
+def test_install_leaves_no_wrapper_when_the_private_binding_is_missing(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Keep the two-module preflight monkeypatch installation transactional.
+    """Leave Hermes unchanged when its private preflight API has moved.
 
-    Hermes private APIs can move one imported binding before the other.  If the
-    second binding is unavailable, installation must not replace or acquire an
-    owner for the first one; registration cannot clean up an acquisition for
-    which ``install`` never returned a callback.
+    A release may remove or rename the proactive estimator before incontext is
+    updated.  Registration must fail open before acquiring an owner because it
+    cannot clean up an installation for which no callback was returned.
     """
 
     def rough(
@@ -858,9 +844,9 @@ def test_partial_install_leaves_first_binding_when_second_is_missing(
         del messages, system_prompt, tools
         return 5
 
-    loop, turn_context = install_fake_hermes(monkeypatch, rough)
-    del loop.estimate_request_tokens_rough
+    _, turn_context = install_fake_hermes(monkeypatch, rough)
+    del turn_context.estimate_request_tokens_rough
 
     assert install(runtime(Counter(100))) is None
-    assert turn_context.estimate_request_tokens_rough is rough
+    assert not hasattr(turn_context, "estimate_request_tokens_rough")
     assert "estimator API changed" in caplog.text

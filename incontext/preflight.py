@@ -120,7 +120,19 @@ class _ExactPreflight:
                     tools=tools,
                 ),
             )
-        provider_messages = list(messages)
+        provider_messages = []
+        for stored_message in messages:
+            message = stored_message
+            if isinstance(stored_message, Mapping):
+                message = dict(stored_message)
+                api_content = message.pop("api_content", None)
+                if (
+                    isinstance(api_content, str)
+                    and api_content
+                    and message.get("role") in {"user", "assistant"}
+                ):
+                    message["content"] = api_content
+            provider_messages.append(message)
         if system_prompt:
             provider_messages.insert(
                 0,
@@ -226,7 +238,6 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
 
     try:
         turn_context = import_module("agent.turn_context")
-        conversation_loop = import_module("agent.conversation_loop")
     except ImportError:
         LOGGER.warning("incontext exact preflight unavailable: Hermes is not installed")
         return None
@@ -234,7 +245,7 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
     owner = object()
     wrappers: List[Tuple[Any, str, Union[_ExactPreflight, _ExactPreflightGate]]] = []
     with _install_lock:
-        modules = (turn_context, conversation_loop)
+        modules = (turn_context,)
         bindings = [
             module.__dict__.get("estimate_request_tokens_rough") for module in modules
         ]
