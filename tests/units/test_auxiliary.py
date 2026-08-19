@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+from inspect import Parameter, Signature
 from typing import Any
 
 import pytest
@@ -202,19 +203,32 @@ def test_auxiliary_falls_back_from_an_invalid_hermes_output_selector(
     assert result["max_tokens"] == 64_000 - 12_345
 
 
+@pytest.mark.parametrize("stale_signature", [False, True])
 def test_auxiliary_wrapper_accepts_additive_hermes_parameters(
     monkeypatch: pytest.MonkeyPatch,
+    stale_signature: bool,
 ) -> None:
-    """Forward newer Hermes builder arguments without signature drift.
+    """Forward newer Hermes arguments or fail open on stale introspection.
 
     Hermes 2026.8 added ``reasoning_config`` and ``task`` to the private
     auxiliary builder used by every sync and async call path.  A wrapper that
     duplicates the older signature raises ``TypeError`` before any provider
-    request, so incontext must transparently forward additive parameters.
+    request, so incontext must transparently forward additive parameters.  A
+    decorated builder can accept them while retaining an older ``__signature__``;
+    once Hermes has built the request, that metadata drift must only skip
+    budgeting rather than fail the otherwise valid auxiliary call.
     """
 
-    auxiliary, _ = install_fake_hermes(monkeypatch)
-    install(runtime(Counter(12_345)))
+    auxiliary, builder = install_fake_hermes(monkeypatch)
+    if stale_signature:
+        builder.__signature__ = Signature(  # type: ignore[attr-defined]
+            [
+                Parameter(name, Parameter.POSITIONAL_OR_KEYWORD)
+                for name in ("provider", "model", "messages")
+            ],
+        )
+    counter = Counter(12_345)
+    install(runtime(counter))
 
     result = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
         "custom",
@@ -226,6 +240,8 @@ def test_auxiliary_wrapper_accepts_additive_hermes_parameters(
 
     assert result["reasoning_config"] == {"effort": "high"}
     assert result["task"] == "compression"
+    assert ("max_tokens" in result) is not stale_signature
+    assert len(counter.requests) == (0 if stale_signature else 1)
 
 
 def test_auxiliary_variadic_builder_without_optional_output_cap() -> None:

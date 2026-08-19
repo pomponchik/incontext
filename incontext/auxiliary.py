@@ -65,8 +65,11 @@ class _AuxiliaryBudget:
         runtime = self._runtime(runtime_source)
         if runtime is None:
             return original_request
-        bound = self.signature.bind(*args, **kwargs)
-        bound.apply_defaults()
+        try:
+            bound = self.signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+        except TypeError:
+            return original_request
         model = self._argument(bound.arguments, "model")
         if model != runtime.settings.model_name:
             return original_request
