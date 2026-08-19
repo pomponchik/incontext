@@ -182,9 +182,9 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
         bounded,
         session_id="incontext-bounded-e2e",
     )
-    assert bounded_result.payload["max_output_tokens"] == 2048
-    assert "max_tokens" not in bounded_result.payload
+    assert bounded_result.payload["max_tokens"] == 2048
     assert "max_completion_tokens" not in bounded_result.payload
+    assert "max_output_tokens" not in bounded_result.payload
     assert bounded["max_tokens"] == 8192
 
     # Hermes' auxiliary builder intentionally drops max_tokens for custom
