@@ -63,6 +63,7 @@ def test_distribution_workflow_imports_wheel_code_in_isolation() -> None:
     assert "wheel-check/bin/python -I" in workflow
     assert "import incontext" in workflow
     assert '"site-packages" in Path(incontext.__file__).parts' in workflow
+    assert 'Path(incontext.__file__).with_name("py.typed").is_file()' in workflow
     assert '("hermes_agent.plugins", "incontext")' in workflow
     assert '("incontext.backends", "vllm")' in workflow
     assert "selected[0].load()" in workflow
