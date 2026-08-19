@@ -13,6 +13,19 @@ LOGGER = logging.getLogger(__name__)
 OUTPUT_BUDGET_FIELDS = ("max_tokens", "max_completion_tokens", "max_output_tokens")
 
 
+def _backend_source(backend: Backend) -> str:
+    """Read optional diagnostics without letting them break middleware."""
+
+    try:
+        return backend.source
+    except Exception as backend_error:  # noqa: BLE001
+        LOGGER.warning(
+            "incontext backend_contract_failed type=%s; source unavailable",
+            type(backend_error).__name__,
+        )
+        return "unknown-backend"
+
+
 def _materialize_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Copy reusable OpenAI collections into their provider-visible shapes."""
 
@@ -151,7 +164,7 @@ class DynamicOutputBudget:
         if not self._matches_route(request, context):
             return None
 
-        source = self.backend.source
+        source = _backend_source(self.backend)
         safety_margin = 0
         try:
             prompt_tokens = self.backend.count(

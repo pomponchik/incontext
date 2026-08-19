@@ -494,11 +494,12 @@ def test_runtime_uses_backend_supported_output_budget_field() -> None:
 
 
 @pytest.mark.parametrize(
-    "failing_hook",
+    ("failing_hook", "budget_is_applied"),
     [
-        "coerce_output_budget",
-        "output_budget_limit",
-        "output_budget_field",
+        ("source", True),
+        ("coerce_output_budget", False),
+        ("output_budget_limit", False),
+        ("output_budget_field", False),
     ],
 )
 def test_runtime_fails_open_when_a_backend_contract_hook_fails(
@@ -506,13 +507,15 @@ def test_runtime_fails_open_when_a_backend_contract_hook_fails(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
     failing_hook: str,
+    budget_is_applied: bool,
 ) -> None:
     """Keep Hermes running when any third-party backend hook fails.
 
     Token counting is not the backend's only extension point: provider-specific
-    cap coercion, limits, and output-field selection also execute inside
-    middleware.  An exception from any of them must leave the caller's request
-    untouched and must not expose provider details through logs.
+    diagnostics, cap coercion, limits, and output-field selection also execute
+    inside middleware.  Diagnostic failure can use a neutral label; arithmetic
+    failures must leave the request unchanged.  Neither may expose provider
+    details through logs or escape into Hermes.
     """
 
     def fail(*args: Any, **kwargs: Any) -> None:
@@ -521,11 +524,15 @@ def test_runtime_fails_open_when_a_backend_contract_hook_fails(
 
     request = {"model": "qwen", "messages": [], "max_tokens": 100}
     backend = Counter(100)
-    monkeypatch.setattr(backend, failing_hook, fail)
+    target = Counter if failing_hook == "source" else backend
+    replacement = property(fail) if failing_hook == "source" else fail
+    monkeypatch.setattr(target, failing_hook, replacement)
     runtime = budget.DynamicOutputBudget(runtime_settings, backend)
 
     with caplog.at_level(logging.WARNING):
-        assert runtime(request=request) is None
+        result = runtime(request=request)
+    assert (result is not None) is budget_is_applied
+    assert ("unknown-backend" in (result or {}).get("reason", "")) is budget_is_applied
     assert request == {"model": "qwen", "messages": [], "max_tokens": 100}
     assert "RuntimeError" in caplog.text
     assert "secret provider detail" not in caplog.text
