@@ -689,6 +689,20 @@ def test_environment_supports_legacy_names() -> None:
             },
             "float",
         ),
+        (
+            {
+                "INCONTEXT_TOKENIZER_URL": "https://example.test/tokenize",
+                "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": "inf",
+            },
+            "greater than",
+        ),
+        (
+            {
+                "INCONTEXT_TOKENIZER_URL": "https://example.test/tokenize",
+                "INCONTEXT_TOKENIZER_TIMEOUT_SECONDS": "nan",
+            },
+            "greater than",
+        ),
     ],
 )
 def test_backend_rejects_unsafe_environment(
