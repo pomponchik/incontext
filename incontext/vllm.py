@@ -249,7 +249,23 @@ class VllmBackend(Backend):
             if merged_template_kwargs or isinstance(template_kwargs, dict):
                 payload["chat_template_kwargs"] = merged_template_kwargs
         payload.setdefault("add_generation_prompt", True)
-        return payload
+        return cast(
+            Dict[str, Any],
+            VllmBackend._materialize_wire_value(payload),
+        )
+
+    @staticmethod
+    def _materialize_wire_value(value: Any) -> Any:
+        """Copy reusable OpenAI containers into JSON-compatible shapes."""
+
+        if isinstance(value, Mapping):
+            return {
+                key: VllmBackend._materialize_wire_value(nested)
+                for key, nested in value.items()
+            }
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            return [VllmBackend._materialize_wire_value(item) for item in value]
+        return value
 
     @staticmethod
     def _normalize_tools(tools: Any) -> Optional[List[Any]]:
@@ -275,13 +291,13 @@ class VllmBackend(Backend):
             return messages
         materialized = list(messages)
         if not any(
-            isinstance(message, dict) and "reasoning_content" in message
+            isinstance(message, Mapping) and "reasoning_content" in message
             for message in materialized
         ):
             return materialized
         normalized = []
         for message in materialized:
-            if not isinstance(message, dict) or "reasoning_content" not in message:
+            if not isinstance(message, Mapping) or "reasoning_content" not in message:
                 normalized.append(message)
                 continue
             normalized_message = dict(message)
@@ -388,18 +404,24 @@ class VllmBackend(Backend):
             if isinstance(extra_body, Mapping)
             else request.get("kv_transfer_params")
         )
-        if not isinstance(params, dict) or "prompt_token_ids" not in params:
+        if not isinstance(params, Mapping) or "prompt_token_ids" not in params:
             return None
         token_ids = params["prompt_token_ids"]
-        if token_ids is None or token_ids == []:
+        if not token_ids:
             return None
-        if not isinstance(token_ids, list) or any(
-            isinstance(token_id, bool) or not isinstance(token_id, int) or token_id < 0
-            for token_id in token_ids
+        if (
+            not isinstance(token_ids, Sequence)
+            or isinstance(token_ids, (str, bytes))
+            or any(
+                isinstance(token_id, bool)
+                or not isinstance(token_id, int)
+                or token_id < 0
+                for token_id in token_ids
+            )
         ):
             raise cls.VllmBackendError(
                 "kv_transfer_params.prompt_token_ids must be a non-empty "
-                "list of non-negative integers",
+                "sequence of non-negative integers",
             )
         return len(token_ids)
 
@@ -419,7 +441,7 @@ class VllmBackend(Backend):
         ):
             return False
         for message in messages:
-            if not isinstance(message, dict):
+            if not isinstance(message, Mapping):
                 continue
             content = message.get("content")
             if isinstance(content, dict):

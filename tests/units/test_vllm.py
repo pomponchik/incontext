@@ -153,7 +153,8 @@ def test_build_payload_includes_tools_and_template_kwargs() -> None:
         "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
     }
     payload = VllmBackend._build_payload(request)
-    assert payload["tools"] is request["tools"]
+    assert payload["tools"] == request["tools"]
+    assert payload["tools"] is not request["tools"]
     assert payload["chat_template_kwargs"] == {"enable_thinking": True}
 
 
@@ -219,6 +220,53 @@ def test_build_payload_materializes_tuple_tools_like_openai_sdk() -> None:
 
     assert payload["tools"] == list(tools)
     assert isinstance(payload["tools"], list)
+
+
+def test_build_payload_recursively_materializes_openai_wire_mappings() -> None:
+    """Mirror OpenAI's recursive conversion of reusable typed mappings.
+
+    The SDK accepts read-only Mapping instances at message, content-part,
+    tool, function, and outer-parameter positions and serializes them as JSON
+    objects.  Leaving any nested object unchanged makes ``json.dumps`` reject
+    the tokenizer payload even though generation reaches vLLM normally,
+    disabling exact counting.  Copies must also preserve caller ownership.
+    """
+
+    content_part = MappingProxyType({"type": "text", "text": "hello"})
+    message = MappingProxyType(
+        {"role": "user", "content": (content_part,)},
+    )
+    function = MappingProxyType(
+        {"name": "lookup", "parameters": MappingProxyType({"type": "object"})},
+    )
+    tool = MappingProxyType({"type": "function", "function": function})
+
+    payload = VllmBackend._build_payload(
+        {
+            "model": "qwen",
+            "messages": (message,),
+            "tools": (tool,),
+        },
+    )
+
+    assert json.loads(json.dumps(payload)) == {
+        "model": "qwen",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"type": "object"},
+                },
+            },
+        ],
+        "add_generation_prompt": True,
+    }
+    assert message["content"][0] is content_part
+    assert tool["function"] is function
 
 
 def test_build_payload_mirrors_every_prompt_affecting_vllm_option() -> None:
@@ -1109,19 +1157,21 @@ def test_count_uses_disaggregated_decode_prompt_token_ids() -> None:
         "truncate_prompt_tokens": -1,
         "kv_transfer_params": {"prompt_token_ids": [1, 2]},
         "extra_body": {
-            "kv_transfer_params": {"prompt_token_ids": [0, 4, 8, 15, 16, 23, 42]},
+            "kv_transfer_params": {
+                "prompt_token_ids": (0, 4, 8, 15, 16, 23, 42),
+            },
         },
     }
 
     assert backend.count(request, context_length=65_536) == 7
-    request["extra_body"]["kv_transfer_params"]["prompt_token_ids"] = [3, 5, 8]
+    request["extra_body"]["kv_transfer_params"]["prompt_token_ids"] = (3, 5, 8)
     assert backend.count(request, context_length=65_536) == 3
     assert len(opener.calls) == 1
 
 
 @pytest.mark.parametrize(
     "token_ids",
-    [False, [True], [-1], ["1"]],
+    [[True], [-1], ["1"]],
 )
 def test_count_rejects_invalid_disaggregated_prompt_token_ids(
     token_ids: Any,
@@ -1151,14 +1201,14 @@ def test_count_rejects_invalid_disaggregated_prompt_token_ids(
     assert opener.calls == []
 
 
-@pytest.mark.parametrize("token_ids", [None, []])
+@pytest.mark.parametrize("token_ids", [None, False, 0, "", {}, [], ()])
 def test_falsy_disaggregated_prompt_ids_render_messages_normally(
     token_ids: Any,
 ) -> None:
     """Treat falsy decode-side IDs as absent exactly as vLLM does.
 
     vLLM consumes ``prompt_token_ids`` with an ``or None`` fallback and follows
-    normal message rendering for null or an empty list.  Rejecting those valid
+    normal message rendering for any falsy JSON value.  Rejecting those valid
     sentinels disables exact counting and applies the rough fallback margin to
     a request generation can serve normally.
     """
