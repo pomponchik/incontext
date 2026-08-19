@@ -660,6 +660,14 @@ def test_legacy_custom_provider_lookup_returns_none_without_a_match() -> None:
         ({"api": "https://inference.example/v1"}, "https://stale.invalid/v1"),
         ({"url": "https://inference.example/v1"}, None),
         ({"base_url": "https://inference.example/v1"}, None),
+        (
+            {
+                "api": "https://inference.example/v1",
+                "url": "https://wrong-url.invalid/v1",
+                "base_url": "https://wrong-base.invalid/v1",
+            },
+            None,
+        ),
     ],
 )
 def test_named_provider_uses_hermes_effective_endpoint(
@@ -1683,7 +1691,8 @@ def test_load_settings_reserves_provider_max_tokens_alias() -> None:
     Hermes lifts ``providers.<name>.max_tokens`` into the runtime completion
     allowance used by gateway-created agents.  Ignoring that supported alias
     gives incontext a larger fictitious compression window than the active
-    compressor for the same named provider.
+    compressor for the same named provider.  When both aliases remain after a
+    configuration migration, its modern ``max_output_tokens`` value wins.
     """
 
     ModernCompressor.calls.clear()
@@ -1706,6 +1715,11 @@ def test_load_settings_reserves_provider_max_tokens_alias() -> None:
     load(config=config)
 
     assert ModernCompressor.calls[-1]["max_tokens"] == 2048
+
+    config["providers"]["local"]["max_output_tokens"] = 1024
+    load(config=config)
+
+    assert ModernCompressor.calls[-1]["max_tokens"] == 1024
 
 
 def test_blank_hermes_max_tokens_falls_back_to_model_configuration() -> None:
