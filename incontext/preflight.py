@@ -52,7 +52,17 @@ class _ExactPreflight:
         *,
         system_prompt: str = "",
         tools: Any = None,
+        **context: Any,
     ) -> int:
+        if context:
+            return int(
+                self.original(
+                    messages,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                    **context,
+                ),
+            )
         runtime = self._runtime()
         if runtime is None or not isinstance(messages, list):
             return int(

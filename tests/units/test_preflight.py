@@ -227,6 +227,48 @@ def test_preflight_falls_back_for_unsupported_message_shape(
     )
 
 
+def test_preflight_fails_open_for_additive_hermes_estimator_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forward unknown private-estimator context to Hermes' rough fallback.
+
+    A later Hermes release may add keyword-only prompt buckets such as
+    ``documents`` to its private estimator.  The reduced exact request cannot
+    account for an unknown bucket safely, so the wrapper must accept and pass
+    the complete call to the original estimator instead of raising before the
+    request path can proceed.
+    """
+
+    calls: list[tuple[Any, str, Any, Any]] = []
+
+    def rough(
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+        documents: Any = None,
+    ) -> int:
+        calls.append((messages, system_prompt, tools, documents))
+        return 17
+
+    loop, turn_context = install_fake_hermes(monkeypatch, rough)
+    counter = Counter(123)
+    install(runtime(counter))
+    arguments = {
+        "system_prompt": "policy",
+        "tools": [],
+        "documents": [{"text": "context"}],
+    }
+
+    assert loop.estimate_request_tokens_rough([], **arguments) == 17
+    assert turn_context.estimate_request_tokens_rough([], **arguments) == 17
+    assert calls == [
+        ([], "policy", [], [{"text": "context"}]),
+        ([], "policy", [], [{"text": "context"}]),
+    ]
+    assert counter.requests == []
+
+
 def test_install_is_idempotent_and_retains_the_initial_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
