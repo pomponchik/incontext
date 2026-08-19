@@ -279,13 +279,13 @@ def test_base_url_normalization_preserves_route_identity(
     assert settings.normalize_base_url(value) == expected
 
 
-def test_load_settings_normalizes_provider_like_hermes() -> None:
-    """Store the canonical provider and endpoint exposed by live Hermes.
+def test_literal_custom_provider_precedes_the_model_endpoint() -> None:
+    """Prefer Hermes' literal ``providers.custom`` route over model metadata.
 
-    Hermes strips and lowercases provider IDs before middleware dispatch, and
-    its HTTP client canonicalizes base URLs.  Applying the same normalization
-    while constructing Settings prevents mixed-case configuration from making
-    the primary route look like an unrelated fallback.
+    The primary gateway resolves a valid entry literally named ``custom``
+    before consulting ``model.base_url``.  Retaining the model endpoint makes
+    every live base-URL guard abstain and silently disables exact budgeting on
+    the endpoint Hermes actually calls.
     """
 
     config = {
@@ -301,7 +301,7 @@ def test_load_settings_normalizes_provider_like_hermes() -> None:
     result = load(config=config)
 
     assert result.provider == "custom"
-    assert result.base_url == "https://inference.example/v1"
+    assert result.base_url == "https://fallback.invalid/v1"
 
 
 def test_load_settings_uses_effective_named_custom_route() -> None:
@@ -425,8 +425,8 @@ def test_load_settings_resolves_legacy_custom_provider_route(selector: str) -> N
     Hermes accepts legacy ``custom_providers`` entries by normalized display
     name or ``provider_key`` and exposes either as provider ``custom`` plus the
     entry endpoint.  Ignoring that persisted schema rejects a valid profile or
-    makes route guards miss every request; its output allowance must also reach
-    the reconstructed ``ContextCompressor`` boundary.
+    makes route guards miss every request.  Legacy normalization deliberately
+    drops unsupported output-cap metadata before constructing the runtime.
     """
 
     ModernCompressor.calls.clear()
@@ -454,7 +454,7 @@ def test_load_settings_resolves_legacy_custom_provider_route(selector: str) -> N
 
     assert result.provider == "custom"
     assert result.base_url == "https://inference.example/v1"
-    assert ModernCompressor.calls[-1]["max_tokens"] == 2048
+    assert ModernCompressor.calls[-1]["max_tokens"] is None
 
 
 @pytest.mark.parametrize(
@@ -1624,24 +1624,45 @@ def test_load_settings_reserves_hermes_environment_output_budget() -> None:
     assert ModernCompressor.calls[-1]["max_tokens"] == 8192
 
 
-def test_load_settings_reserves_provider_output_budget() -> None:
-    """Use the selected provider allowance when no higher-priority cap exists.
+def test_load_settings_uses_only_a_selected_provider_output_budget() -> None:
+    """Use only the allowance Hermes promotes from its selected provider.
 
     Hermes promotes ``providers.<route>.max_output_tokens`` into the agent's
-    effective completion allowance.  Passing that same value to the rebuilt
-    compressor keeps its threshold identical for both named and direct custom
-    routes instead of budgeting beyond the live compression boundary.
+    effective completion allowance only after resolving a usable endpoint.
+    Passing the selected positive integer keeps both compressors aligned;
+    metadata on an incomplete provider block must not reserve output space in
+    incontext when Hermes ignores that block entirely.
     """
 
     ModernCompressor.calls.clear()
     config = {
         **base_config,
-        "providers": {"custom": {"max_output_tokens": "2048"}},
+        "model": {
+            "default": "qwen-test",
+            "provider": "custom:local",
+            "context_length": 65_536,
+        },
+        "providers": {
+            "local": {
+                "api": "https://inference.example/v1",
+                "max_output_tokens": 2048,
+            },
+        },
     }
 
     load(config=config)
 
     assert ModernCompressor.calls[-1]["max_tokens"] == 2048
+
+    ModernCompressor.calls.clear()
+    load(
+        config={
+            **base_config,
+            "providers": {"custom": {"max_output_tokens": 1024}},
+        },
+    )
+
+    assert ModernCompressor.calls[-1]["max_tokens"] is None
 
 
 def test_load_settings_reserves_provider_max_tokens_alias() -> None:
@@ -1729,21 +1750,37 @@ def test_load_settings_rejects_invalid_hermes_output_budget(value: Any) -> None:
         load(config=config)
 
 
-def test_load_settings_rejects_invalid_provider_output_budget() -> None:
-    """Reject a malformed effective provider reserve before window derivation.
+@pytest.mark.parametrize("value", [True, 0, -1, "2048", "invalid"])
+def test_load_settings_ignores_provider_caps_hermes_does_not_promote(
+    value: Any,
+) -> None:
+    """Reserve only an output cap Hermes promotes from the selected runtime.
 
-    An invalid selected provider allowance cannot be silently omitted because
-    Hermes may reject it or derive a different threshold; startup failure is
-    safer than claiming exact budgeting against a fictitious compressor.
+    Hermes lifts only a positive integer from a selected modern provider;
+    booleans, quoted numbers, non-positive values, and malformed metadata stay
+    out of ``AIAgent``.  Parsing the raw value changes the reconstructed
+    compression boundary even though the live runtime ignores it.
     """
 
     config = {
         **base_config,
-        "providers": {"custom": {"max_output_tokens": "invalid"}},
+        "model": {
+            "default": "qwen-test",
+            "provider": "custom:local",
+            "context_length": 65_536,
+        },
+        "providers": {
+            "local": {
+                "api": "https://inference.example/v1",
+                "max_output_tokens": value,
+            },
+        },
     }
 
-    with pytest.raises(settings.SettingsError, match="provider max_output_tokens"):
-        load(config=config)
+    ModernCompressor.calls.clear()
+    load(config=config)
+
+    assert ModernCompressor.calls[-1]["max_tokens"] is None
 
 
 def test_load_settings_explicit_window_avoids_compressor_construction() -> None:

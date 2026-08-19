@@ -371,6 +371,8 @@ def _normalized_legacy_provider(
     normalized = dict(configured)
     for alias in ("api", "url", "base_url", "baseUrl"):
         normalized.pop(alias, None)
+    normalized.pop("max_output_tokens", None)
+    normalized.pop("max_tokens", None)
     normalized["base_url"] = endpoint
     return normalized
 
@@ -561,19 +563,13 @@ def _effective_provider_route(
             custom_providers,
         )
     else:
-        if provider == "custom" and not model.get("base_url"):
-            configured_provider = _configured_provider(
-                providers,
-                custom_providers,
-                provider,
-            )
-            named = configured_provider is not None
-        else:
-            configured_provider = providers.get(provider)
-        if configured_provider is not None and isinstance(
-            configured_provider,
-            Mapping,
-        ):
+        configured_provider = _configured_provider(
+            providers,
+            custom_providers,
+            provider,
+        )
+        named = configured_provider is not None
+        if configured_provider is not None:
             provider_config = configured_provider
     provider_endpoint = _modern_provider_endpoint(provider_config)
     base_url = normalize_base_url(
@@ -610,12 +606,12 @@ def _effective_max_tokens(
     provider_configured = provider_config.get("max_output_tokens")
     if provider_configured is None:
         provider_configured = provider_config.get("max_tokens")
-    if provider_configured is not None:
-        return _strict_int(
-            provider_configured,
-            "Hermes provider max_output_tokens",
-            minimum=1,
-        )
+    if (
+        isinstance(provider_configured, int)
+        and not isinstance(provider_configured, bool)
+        and provider_configured > 0
+    ):
+        return provider_configured
     return None
 
 
