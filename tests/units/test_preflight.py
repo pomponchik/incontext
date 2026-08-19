@@ -535,18 +535,22 @@ def test_cleanup_restores_all_preflight_bindings_after_final_owner(
         return 5
 
     _, turn_context = install_fake_hermes(monkeypatch, rough)
+    original_gate = turn_context.__dict__["_should_run_preflight_estimate"]
     first_cleanup = install(runtime(Counter(100)))
     second_cleanup = install(runtime(Counter(200)))
     assert callable(first_cleanup)
     assert callable(second_cleanup)
     turn_wrapper = turn_context.estimate_request_tokens_rough
+    gate_wrapper = turn_context.__dict__["_should_run_preflight_estimate"]
 
     first_cleanup()
     assert turn_context.estimate_request_tokens_rough is turn_wrapper
+    assert turn_context.__dict__["_should_run_preflight_estimate"] is gate_wrapper
 
     second_cleanup()
     second_cleanup()
     assert turn_context.estimate_request_tokens_rough is rough
+    assert turn_context.__dict__["_should_run_preflight_estimate"] is original_gate
 
 
 def test_install_snapshot_is_serialized_with_final_owner_cleanup(
@@ -689,15 +693,15 @@ def test_preflight_skips_profiles_without_an_active_plugin_owner() -> None:
     assert counter.requests == []
 
 
-def test_final_owner_release_cannot_race_active_preflight() -> None:
+@pytest.mark.parametrize("is_gate", [False, True])
+def test_final_owner_release_cannot_race_active_preflight(is_gate: bool) -> None:
     """Keep the final unload from invalidating an in-flight no-GIL lookup.
 
-    The estimator wrapper is process-global, so plugin cleanup can release its
-    last owner while another thread is entering Hermes' preflight estimator.
-    Reading the owner list once for truthiness and again for indexing permits
-    cleanup to replace it with an empty list between those operations on
-    free-threaded CPython.  One snapshot must instead remain valid for the
-    complete lookup.
+    The estimator and its cheap-gate wrapper are process-global, so plugin
+    cleanup can release their last owner while another thread enters preflight.
+    Reading either owner list twice permits cleanup to replace it with an empty
+    list between truthiness and indexing on free-threaded CPython.  One snapshot
+    must instead remain valid for the complete lookup in both wrappers.
     """
 
     checked = threading.Event()
@@ -719,11 +723,15 @@ def test_final_owner_release_cannot_race_active_preflight() -> None:
         return 7
 
     resolver = lambda: None  # noqa: E731
-    wrapper = _ExactPreflight(resolver, rough)
+    wrapper = (
+        _ExactPreflightGate(resolver, lambda *args, **kwargs: False)
+        if is_gate
+        else _ExactPreflight(resolver, rough)
+    )
     owner = object()
     wrapper.acquire(owner, resolver)
     wrapper._owners = BlockingOwners(wrapper._owners)
-    results: list[int] = []
+    results: list[Any] = []
     errors: list[BaseException] = []
 
     def estimate() -> None:
@@ -741,7 +749,7 @@ def test_final_owner_release_cannot_race_active_preflight() -> None:
 
     assert not worker.is_alive()
     assert errors == []
-    assert results == [7]
+    assert results == [False if is_gate else 7]
 
 
 def test_cleanup_never_overwrites_later_preflight_bindings(
