@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import types
 from inspect import Parameter, Signature
 from typing import Any
@@ -732,15 +733,84 @@ def test_cleanup_never_overwrites_a_later_auxiliary_wrapper(
     ownership and must never put an older function back over newer state.
     """
 
-    auxiliary, _ = install_fake_hermes(monkeypatch)
-    cleanup = install(runtime(Counter(100)))
+    auxiliary, original = install_fake_hermes(monkeypatch)
+    first = Counter(100)
+    cleanup = install(runtime(first))
     assert callable(cleanup)
+    stale_wrapper = auxiliary._build_call_kwargs  # type: ignore[attr-defined]
 
     replacement = lambda *args, **kwargs: {}  # noqa: E731
     auxiliary._build_call_kwargs = replacement  # type: ignore[attr-defined]
     cleanup()
 
     assert auxiliary._build_call_kwargs is replacement  # type: ignore[attr-defined]
+
+    auxiliary._build_call_kwargs = stale_wrapper  # type: ignore[attr-defined]
+    second = Counter(200)
+    second_cleanup = install(runtime(second))
+    assert callable(second_cleanup)
+    result = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [],
+    )
+
+    assert result["max_tokens"] == 64_000 - 200
+    assert first.requests == []
+    assert len(second.requests) == 1
+    second_cleanup()
+    assert auxiliary._build_call_kwargs is original  # type: ignore[attr-defined]
+
+
+def test_final_owner_release_cannot_race_auxiliary_configuration() -> None:
+    """Use one coherent owner snapshot during a free-threaded request.
+
+    Final profile cleanup can replace the immutable owner tuple while an
+    auxiliary call selects its runtime and output-field helper.  Reading the
+    attribute once for truthiness and again for indexing could observe two
+    tuples and either raise or mix profile configuration; the in-flight call
+    must retain the complete pre-cleanup snapshot.
+    """
+
+    checked = threading.Event()
+    resume = threading.Event()
+
+    class BlockingOwners(tuple):
+        def __bool__(self) -> bool:
+            checked.set()
+            assert resume.wait(timeout=2)
+            return super().__len__() != 0
+
+    def build(provider: str, model: str, messages: list[Any]) -> dict[str, Any]:
+        del provider
+        return {"model": model, "messages": messages}
+
+    counter = Counter(100)
+    active = runtime(counter)
+    wrapper = _AuxiliaryBudget(lambda: None, build)
+    owner = object()
+    wrapper.acquire(owner, active, None)
+    wrapper._owners = BlockingOwners(wrapper._owners)
+    results: list[dict[str, Any]] = []
+    errors: list[BaseException] = []
+
+    def call() -> None:
+        try:
+            results.append(wrapper("custom", "qwen-test", []))
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    worker = threading.Thread(target=call)
+    worker.start()
+    assert checked.wait(timeout=2)
+    wrapper.release(owner)
+    resume.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert results[0]["max_tokens"] == 64_000 - 100
+    assert len(counter.requests) == 1
 
 
 def test_stale_auxiliary_cleanup_cannot_remove_a_new_installation(
