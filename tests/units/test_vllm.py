@@ -423,11 +423,13 @@ def test_build_payload_normalizes_deprecated_reasoning_content() -> None:
     removed, matching the provider's null-aware validator exactly.
     """
 
-    legacy = {
-        "role": "assistant",
-        "content": "answer",
-        "reasoning_content": "private trace",
-    }
+    legacy = MappingProxyType(
+        {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning_content": "private trace",
+        },
+    )
     modern = {
         "role": "assistant",
         "content": "answer",
@@ -445,13 +447,13 @@ def test_build_payload_normalizes_deprecated_reasoning_content() -> None:
         "content": "answer",
         "reasoning_content": None,
     }
-    messages: list[Any] = [
+    messages: tuple[Any, ...] = (
         "invalid-provider-value",
         legacy,
         modern,
         explicit_null,
         empty_legacy,
-    ]
+    )
 
     payload = VllmBackend._build_payload({"model": "qwen", "messages": messages})
 
