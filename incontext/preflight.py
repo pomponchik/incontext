@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Collection, Mapping
 from importlib import import_module
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 from .budget import DynamicOutputBudget
+from .settings import normalize_base_url
 
 LOGGER = logging.getLogger(__name__)
 RoughEstimator = Callable[..., int]
@@ -16,6 +18,47 @@ RuntimeSource = Union[
     Callable[[], Optional[DynamicOutputBudget]],
 ]
 Cleanup = Callable[[], None]
+
+
+def _live_main_route() -> Optional[Tuple[str, str, str]]:
+    """Read Hermes' turn-local primary route across supported releases."""
+
+    try:
+        auxiliary = import_module("agent.auxiliary_client")
+    except ImportError:
+        return None
+    getter = auxiliary.__dict__.get("_runtime_main_value")
+    try:
+        if callable(getter):
+            values = (
+                str(getter("provider") or ""),
+                str(getter("model") or ""),
+                str(getter("base_url") or ""),
+            )
+        else:
+            values = (
+                str(auxiliary.__dict__.get("_RUNTIME_MAIN_PROVIDER") or ""),
+                str(auxiliary.__dict__.get("_RUNTIME_MAIN_MODEL") or ""),
+                str(auxiliary.__dict__.get("_RUNTIME_MAIN_BASE_URL") or ""),
+            )
+    except Exception:  # noqa: BLE001
+        return ("", "\0route-unavailable", "")
+    return values if any(values) else None
+
+
+def _matches_live_route(runtime: DynamicOutputBudget) -> bool:
+    """Return whether the exact backend still owns Hermes' active route."""
+
+    route = _live_main_route()
+    if route is None:
+        return True
+    provider, model, base_url = route
+    settings = runtime.settings
+    if model != settings.model_name:
+        return False
+    if settings.provider and provider.strip().lower() != settings.provider:
+        return False
+    return not (settings.base_url and normalize_base_url(base_url) != settings.base_url)
 
 
 class _ExactPreflight:
@@ -64,7 +107,12 @@ class _ExactPreflight:
                 ),
             )
         runtime = self._runtime()
-        if runtime is None or not isinstance(messages, list):
+        if (
+            runtime is None
+            or not _matches_live_route(runtime)
+            or not isinstance(messages, Collection)
+            or isinstance(messages, (str, bytes, Mapping))
+        ):
             return int(
                 self.original(
                     messages,
@@ -82,8 +130,15 @@ class _ExactPreflight:
             "model": runtime.settings.model_name,
             "messages": provider_messages,
         }
-        if isinstance(tools, list) and tools:
-            request["tools"] = tools
+        if (
+            isinstance(tools, Collection)
+            and not isinstance(
+                tools,
+                (str, bytes, Mapping),
+            )
+            and tools
+        ):
+            request["tools"] = list(tools)
         try:
             return runtime.backend.count(
                 request,
@@ -106,6 +161,44 @@ class _ExactPreflight:
                 ),
             )
             return rough_tokens + runtime.settings.fallback_margin_tokens
+
+    def _runtime(self) -> Optional[DynamicOutputBudget]:
+        owners = self._owners
+        runtime_source = owners[-1][1] if owners else self.runtime_source
+        if isinstance(runtime_source, DynamicOutputBudget):
+            return runtime_source
+        return runtime_source()
+
+
+class _ExactPreflightGate:
+    """Force the exact estimate before Hermes' message-only cheap gate."""
+
+    def __init__(self, runtime: RuntimeSource, original: Callable[..., bool]) -> None:
+        self.runtime_source = runtime
+        self.original = original
+        self._owners: List[Tuple[object, RuntimeSource]] = []
+
+    def acquire(self, owner: object, runtime: RuntimeSource) -> None:
+        """Attach one installation owner and make its runtime current."""
+
+        self._owners.append((owner, runtime))
+
+    def release(self, owner: object) -> None:
+        """Release one installation owner without disturbing the others."""
+
+        self._owners = [entry for entry in self._owners if entry[0] is not owner]
+
+    @property
+    def owned(self) -> bool:
+        """Return whether this wrapper belongs to an active installation."""
+
+        return bool(self._owners)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> bool:
+        runtime = self._runtime()
+        if runtime is not None and _matches_live_route(runtime):
+            return True
+        return bool(self.original(*args, **kwargs))
 
     def _runtime(self) -> Optional[DynamicOutputBudget]:
         owners = self._owners
@@ -139,13 +232,14 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
         return None
 
     owner = object()
-    wrappers: List[Tuple[Any, _ExactPreflight]] = []
+    wrappers: List[Tuple[Any, str, Union[_ExactPreflight, _ExactPreflightGate]]] = []
     with _install_lock:
         modules = (turn_context, conversation_loop)
         bindings = [
             module.__dict__.get("estimate_request_tokens_rough") for module in modules
         ]
-        if not all(callable(binding) for binding in bindings):
+        gate_binding = turn_context.__dict__.get("_should_run_preflight_estimate")
+        if not all(callable(binding) for binding in (*bindings, gate_binding)):
             LOGGER.warning(
                 "incontext exact preflight unavailable: Hermes estimator API changed"
             )
@@ -157,7 +251,19 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
                 wrapper = _ExactPreflight(runtime, cast(RoughEstimator, current))
                 module.__dict__["estimate_request_tokens_rough"] = wrapper
             wrapper.acquire(owner, runtime)
-            wrappers.append((module, wrapper))
+            wrappers.append((module, "estimate_request_tokens_rough", wrapper))
+        if isinstance(gate_binding, _ExactPreflightGate) and gate_binding.owned:
+            gate_wrapper = gate_binding
+        else:
+            gate_wrapper = _ExactPreflightGate(
+                runtime,
+                cast(Callable[..., bool], gate_binding),
+            )
+            turn_context.__dict__["_should_run_preflight_estimate"] = gate_wrapper
+        gate_wrapper.acquire(owner, runtime)
+        wrappers.append(
+            (turn_context, "_should_run_preflight_estimate", gate_wrapper),
+        )
 
     closed = False
 
@@ -169,12 +275,9 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
             if closed:
                 return
             closed = True
-            for module, wrapper in wrappers:
+            for module, binding_name, wrapper in wrappers:
                 wrapper.release(owner)
-                if (
-                    not wrapper.owned
-                    and module.__dict__.get("estimate_request_tokens_rough") is wrapper
-                ):
-                    module.__dict__["estimate_request_tokens_rough"] = wrapper.original
+                if not wrapper.owned and module.__dict__.get(binding_name) is wrapper:
+                    module.__dict__[binding_name] = wrapper.original
 
     return cleanup

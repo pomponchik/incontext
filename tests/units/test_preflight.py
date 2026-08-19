@@ -10,7 +10,7 @@ import pytest
 from incontext import preflight
 from incontext.backend import Backend
 from incontext.budget import DynamicOutputBudget
-from incontext.preflight import _ExactPreflight, install
+from incontext.preflight import _ExactPreflight, _ExactPreflightGate, install
 from incontext.settings import Settings
 
 
@@ -58,6 +58,9 @@ def install_fake_hermes(
     turn_context = types.ModuleType("agent.turn_context")
     loop.estimate_request_tokens_rough = original  # type: ignore[attr-defined]
     turn_context.estimate_request_tokens_rough = original  # type: ignore[attr-defined]
+    turn_context._should_run_preflight_estimate = (  # type: ignore[attr-defined]
+        lambda messages, protect_first_n, protect_last_n, threshold_tokens: False
+    )
     monkeypatch.setitem(sys.modules, "agent", agent)
     monkeypatch.setitem(sys.modules, "agent.conversation_loop", loop)
     monkeypatch.setitem(sys.modules, "agent.turn_context", turn_context)
@@ -147,6 +150,180 @@ def test_install_patches_the_turn_context_binding_used_for_compression(
         )
         == 123
     )
+
+
+def test_install_forces_exact_preflight_before_message_only_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run exact preflight for short histories with large hidden prompt parts.
+
+    Hermes' cheap gate estimates only message content and can return false
+    while a system prompt or tool schemas already cross the compression
+    boundary.  If incontext leaves that gate unchanged, its exact estimator is
+    never called and later middleware can only fail open after compression was
+    skipped.  An active matching runtime must force the authoritative estimate
+    before request construction.
+    """
+
+    def rough(messages: Any, *, system_prompt: str = "", tools: Any = None) -> int:
+        del messages, system_prompt, tools
+        return 7
+
+    _, turn_context = install_fake_hermes(monkeypatch, rough)
+    counter = Counter(60_000)
+    cleanup = install(runtime(counter))
+    assert callable(cleanup)
+
+    assert not turn_context._should_run_preflight_estimate.original([], 3, 20, 64_000)  # type: ignore[attr-defined]
+    assert turn_context._should_run_preflight_estimate([], 3, 20, 64_000)  # type: ignore[attr-defined]
+    assert (
+        turn_context.estimate_request_tokens_rough(
+            [],
+            system_prompt="large policy",
+            tools=({"type": "function"},),
+        )
+        == 60_000
+    )
+    assert counter.requests == [
+        {
+            "model": "qwen-test",
+            "messages": [{"role": "system", "content": "large policy"}],
+            "tools": [{"type": "function"}],
+        },
+    ]
+
+
+def test_preflight_uses_rough_estimate_after_live_model_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never reuse the startup tokenizer after Hermes switches live route.
+
+    Hermes' ``/model`` path changes model, provider, endpoint and compressor
+    in-place without rediscovering plugins.  Public and auxiliary route guards
+    already abstain, so preflight must likewise use Hermes' native estimator
+    rather than render the new conversation with the stale startup template.
+    """
+
+    def rough(messages: Any, *, system_prompt: str = "", tools: Any = None) -> int:
+        del messages, system_prompt, tools
+        return 17
+
+    loop, turn_context = install_fake_hermes(monkeypatch, rough)
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+    live_route = {
+        "provider": "custom",
+        "model": "switched-model",
+        "base_url": "https://switched.invalid/v1",
+    }
+    auxiliary._runtime_main_value = live_route.get  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+    counter = Counter(999)
+    install(runtime(counter))
+
+    assert not turn_context._should_run_preflight_estimate([], 3, 20, 64_000)  # type: ignore[attr-defined]
+    assert loop.estimate_request_tokens_rough([]) == 17
+    assert counter.requests == []
+
+
+def test_live_route_reader_supports_legacy_hermes_globals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read turn-local route mirrors from Hermes releases before ContextVar API.
+
+    Hermes v2026.7 stores the primary route in three module attributes, while
+    newer releases expose a private ContextVar reader.  Supporting both keeps
+    live-switch protection active across the package's declared compatibility
+    range instead of silently trusting a stale tokenizer on the older release.
+    """
+
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+    auxiliary._RUNTIME_MAIN_PROVIDER = "custom"  # type: ignore[attr-defined]
+    auxiliary._RUNTIME_MAIN_MODEL = "qwen-test"  # type: ignore[attr-defined]
+    auxiliary._RUNTIME_MAIN_BASE_URL = "https://primary.invalid/v1"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+
+    assert preflight._live_main_route() == (
+        "custom",
+        "qwen-test",
+        "https://primary.invalid/v1",
+    )
+
+
+def test_live_route_reader_marks_a_broken_private_api_as_unmatched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail to Hermes' rough estimator when private route lookup breaks."""
+
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+
+    def fail(field: str) -> str:
+        del field
+        raise RuntimeError("private API changed")
+
+    auxiliary._runtime_main_value = fail  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+
+    assert preflight._live_main_route() == ("", "\0route-unavailable", "")
+
+
+@pytest.mark.parametrize(
+    "live_route",
+    [
+        {
+            "provider": "openai",
+            "model": "qwen-test",
+            "base_url": "https://primary.invalid/v1",
+        },
+        {
+            "provider": "custom",
+            "model": "qwen-test",
+            "base_url": "https://fallback.invalid/v1",
+        },
+    ],
+)
+def test_preflight_route_guard_checks_provider_and_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    live_route: dict[str, str],
+) -> None:
+    """Reject same-model switches that change either remaining route identity.
+
+    A fallback can expose the same model alias through another provider or URL.
+    Model equality alone does not prove tokenizer/template compatibility, so
+    exact preflight must require all configured route dimensions to match.
+    """
+
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+    auxiliary._runtime_main_value = live_route.get  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+    scoped = DynamicOutputBudget(
+        Settings(
+            model_name="qwen-test",
+            context_length=65_536,
+            compression_window=64_000,
+            fallback_margin_tokens=1024,
+            provider="custom",
+            base_url="https://primary.invalid/v1",
+        ),
+        Counter(1),
+    )
+
+    assert preflight._matches_live_route(scoped) is False
+
+
+def test_exact_gate_resolves_profile_runtime_at_call_time() -> None:
+    """Use the active profile's resolver for every cheap-gate decision."""
+
+    active = runtime(Counter(1))
+    calls: list[None] = []
+
+    def resolve() -> DynamicOutputBudget:
+        calls.append(None)
+        return active
+
+    gate = _ExactPreflightGate(resolve, lambda *args, **kwargs: False)
+
+    assert gate([], 3, 20, 64_000) is True
+    assert calls == [None]
 
 
 def test_preflight_preserves_empty_tool_shape(
