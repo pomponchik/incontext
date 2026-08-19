@@ -111,9 +111,13 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
         get_plugin_manager,
     )
 
-    from incontext.hermes import get_runtime  # noqa: PLC0415
+    from incontext.hermes import _reset_runtime_for_tests, get_runtime  # noqa: PLC0415
     from incontext.vllm import VllmBackend  # noqa: PLC0415
 
+    # Container images may preload plugins from sitecustomize or pytest entry
+    # points before this test installs its isolated Hermes home. Reset only the
+    # package cache so discovery validates the fixture configuration itself.
+    _reset_runtime_for_tests()
     manager = get_plugin_manager()
     manager.discover_and_load(force=True)
     loaded = manager._plugins["incontext"]
@@ -132,9 +136,6 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
             },
         ],
         "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
-        "max_tokens": 8192,
-        "max_completion_tokens": 4096,
-        "max_output_tokens": 2048,
     }
     result = apply_llm_request_middleware(original, session_id="incontext-e2e")
     runtime = get_runtime()
@@ -159,7 +160,7 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
             ),
         },
     ]
-    assert original["max_tokens"] == 8192
+    assert "max_tokens" not in original
 
     assert TokenizerHandler.requests == [
         {
@@ -170,3 +171,50 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
             "tools": original["tools"],
         },
     ]
+
+    bounded = {
+        **original,
+        "max_tokens": 8192,
+        "max_completion_tokens": 4096,
+        "max_output_tokens": 2048,
+    }
+    bounded_result = apply_llm_request_middleware(
+        bounded,
+        session_id="incontext-bounded-e2e",
+    )
+    assert bounded_result.payload["max_tokens"] == 2048
+    assert "max_completion_tokens" not in bounded_result.payload
+    assert "max_output_tokens" not in bounded_result.payload
+    assert bounded["max_tokens"] == 8192
+
+    # Hermes' auxiliary builder intentionally drops max_tokens for custom
+    # providers. The plugin must cover this path as well as public middleware,
+    # otherwise compression summaries silently regain the provider's full
+    # context remainder.
+    from agent.auxiliary_client import (  # type: ignore[import-not-found]  # noqa: PLC0415
+        _build_call_kwargs,
+    )
+
+    auxiliary_bounded = _build_call_kwargs(
+        "custom",
+        "qwen-e2e",
+        [{"role": "user", "content": "Bound this compression summary"}],
+        max_tokens=2048,
+        base_url="http://inference.invalid/v1",
+    )
+    assert auxiliary_bounded["max_tokens"] == 2048
+
+    auxiliary_dynamic = _build_call_kwargs(
+        "custom",
+        "qwen-e2e",
+        [{"role": "user", "content": "Budget this title dynamically"}],
+        base_url="http://inference.invalid/v1",
+    )
+    assert auxiliary_dynamic["max_tokens"] == (
+        runtime.settings.compression_window - TokenizerHandler.prompt_tokens
+    )
+
+    # The bounded public request above has the same provider-visible prompt as
+    # the first request, so VllmBackend correctly serves it from cache. The two
+    # distinct auxiliary prompts each require one additional tokenizer call.
+    assert len(TokenizerHandler.requests) == 3

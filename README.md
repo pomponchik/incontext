@@ -17,32 +17,53 @@ output budget still available below Hermes' context-compression boundary. It
 prevents a fixed, oversized `max_tokens` value from consuming the input space
 where Hermes must still be able to compress the conversation.
 
-The package supports CPython 3.8 through 3.15, including free-threaded Python
-3.14. Unit tests, formatting, linting, and static type checks run across the
-complete version matrix in CI.
-
 The plugin reads the effective compression window from the installed Hermes
 `ContextCompressor`, asks the selected inference backend to tokenize the exact
 provider-visible prompt, and applies:
 
 ```text
-max_tokens = max(1, compression_window - prompt_tokens)
+max_tokens = min(
+    caller_max_tokens,
+    compression_window - prompt_tokens,
+)
 ```
+
+When the caller does not provide an output cap, `incontext` uses the whole
+free remainder of the compression window. A smaller positive caller cap is
+preserved, which keeps bounded auxiliary operations such as Hermes context
+summarization from becoming unexpectedly long.
+
+Hermes auxiliary calls (including context-compression summaries, generated
+titles, and vision helpers) do not pass through the public `llm_request`
+middleware. Hermes also omits `max_tokens` for most custom providers. The
+plugin therefore wraps Hermes' auxiliary request builder at registration time:
+those requests receive the same exact budget, and an explicit smaller caller
+cap is not lost. If exact counting cannot produce a safe result, the wrapper
+leaves Hermes' original request unchanged.
+
+The expression is applied only while its result is positive. A zero or
+negative result is not converted to the invalid sentinel `max_tokens=1`.
+Instead, incontext installs the same exact counter into Hermes' pre-API
+compression estimator, so Hermes compacts the conversation before it creates
+the provider request. If the tokenizer is temporarily unavailable, this bridge
+falls back to Hermes' native rough estimator and the request middleware itself
+remains fail-open.
 
 This addresses the same output-budget arithmetic discussed in
 [NousResearch/hermes-agent#38652](https://github.com/NousResearch/hermes-agent/issues/38652).
 
 ## Installation
 
-Once a release is available on PyPI, install and enable the package using the
-same plugin name, `incontext`:
+Once release 0.0.2 or newer is available on PyPI, install and enable the package
+using the same plugin name, `incontext`:
 
 ```bash
-python -m pip install incontext
+python -m pip install 'incontext>=0.0.2'
 hermes plugins enable incontext
 ```
 
-Until the first PyPI release, install the reviewed `develop` revision:
+Until that safety-complete release is published, install the current `develop`
+branch:
 
 ```bash
 python -m pip install 'git+https://github.com/pomponchik/incontext.git@develop'
@@ -64,7 +85,7 @@ endpoint of the same vLLM model Hermes uses:
 export INCONTEXT_BACKEND='vllm'
 export INCONTEXT_TOKENIZER_URL='https://inference.example/tokenize'
 export INCONTEXT_TOKENIZER_TIMEOUT_SECONDS='30'
-export INCONTEXT_TOKENIZER_USER_AGENT='incontext/0.0.1'
+export INCONTEXT_TOKENIZER_USER_AGENT='incontext/0.0.2'
 export INCONTEXT_FALLBACK_MARGIN_TOKENS='1024'
 ```
 
@@ -85,7 +106,7 @@ The optional variables are:
 |---|---:|---|
 | `INCONTEXT_BACKEND` | `vllm` | Named `pristan` backend plugin |
 | `INCONTEXT_TOKENIZER_TIMEOUT_SECONDS` | `30` | `/tokenize` request timeout |
-| `INCONTEXT_TOKENIZER_USER_AGENT` | `incontext/0.0.1` | HTTP user agent |
+| `INCONTEXT_TOKENIZER_USER_AGENT` | `incontext/0.0.2` | HTTP user agent |
 | `INCONTEXT_FALLBACK_MARGIN_TOKENS` | `1024` | Extra reserve only when exact tokenization fails |
 | `INCONTEXT_COMPRESSION_WINDOW_TOKENS` | unset | Explicit emergency override for the resolved Hermes boundary |
 
@@ -96,9 +117,9 @@ aliases. New deployments should use the `INCONTEXT_*` names.
 ## Replacing the inference backend
 
 The budgeting core depends only on the abstract `incontext.Backend` contract.
-It has no import or construction dependency on vLLM. A backend supplies three
-operations: its safe diagnostic `source`, exact `count(...)`, and
-`clear_cache()`.
+It has no import or construction dependency on vLLM. A backend supplies its
+safe diagnostic `source`, exact `count(...)`, cache invalidation, and an
+optional output-field normalization hook.
 
 Backend implementations are named `pristan` plugins in the
 `incontext.backends` entry-point group. The generic `skelet` environment has a
@@ -123,7 +144,7 @@ plugin module registers a provider under a new name:
 # acme_backend/plugin.py
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict
 
 from incontext import Backend, backends
 
@@ -135,7 +156,7 @@ class AcmeBackend(Backend):
 
     def count(
         self,
-        request: dict[str, Any],
+        request: Dict[str, Any],
         *,
         context_length: int,
     ) -> int:
@@ -175,10 +196,15 @@ settings object contains only the compression-window and fallback-budget policy.
 - With the bundled backend, vLLM applies its real chat template to messages, tools, and
   `chat_template_kwargs`; local tokenizer approximations are not used.
 - The returned `max_model_len` must equal Hermes' configured context length.
-- `max_tokens`, `max_completion_tokens`, and `max_output_tokens` are normalized
-  to one unambiguous `max_tokens` field.
+- `max_tokens`, `max_completion_tokens`, and `max_output_tokens` are reduced to
+  the smallest positive caller cap while preserving the corresponding
+  provider-selected field name; a full compression window is handed to
+  preflight compression.
 - The incoming request is copied and never mutated.
 - Exact counts use a bounded, thread-safe cache.
+- The exact counter is also used by Hermes' preflight compressor, eliminating
+  the former gap where compression used a rough count but budgeting used an
+  exact one.
 - If `/tokenize` fails, Hermes' own rough estimator is used with an additional
   safety margin. If both counters fail, the middleware leaves the request
   unchanged instead of taking Hermes down.

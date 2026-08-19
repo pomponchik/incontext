@@ -1,0 +1,911 @@
+from __future__ import annotations
+
+import sys
+import threading
+import types
+from inspect import Parameter, Signature
+from typing import Any
+
+import pytest
+from hypothesis import given
+from hypothesis import strategies as st
+
+from incontext.auxiliary import _AuxiliaryBudget, install
+from incontext.backend import Backend
+from incontext.budget import DynamicOutputBudget
+from incontext.settings import Settings
+
+
+class Counter(Backend):
+    def __init__(self, result: int) -> None:
+        self.result = result
+        self.requests: list[dict[str, Any]] = []
+
+    @property
+    def source(self) -> str:
+        return "test-counter"
+
+    def count(self, request: dict[str, Any], *, context_length: int) -> int:
+        assert context_length == 65_536
+        self.requests.append(request)
+        return self.result
+
+    def clear_cache(self) -> None:
+        self.requests.clear()
+
+
+def runtime(counter: Counter) -> DynamicOutputBudget:
+    return DynamicOutputBudget(
+        Settings(
+            model_name="qwen-test",
+            context_length=65_536,
+            compression_window=64_000,
+            fallback_margin_tokens=1024,
+            provider="",
+            base_url="",
+        ),
+        counter,
+    )
+
+
+def install_fake_hermes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[types.ModuleType, Any]:
+    agent = types.ModuleType("agent")
+    agent.__path__ = []  # type: ignore[attr-defined]
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        tools: list[Any] | None = None,
+        timeout: float = 30.0,
+        extra_body: dict[str, Any] | None = None,
+        reasoning_config: dict[str, Any] | None = None,
+        base_url: str | None = None,
+        task: str | None = None,
+    ) -> dict[str, Any]:
+        del provider, max_tokens, base_url
+        return {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "tools": tools,
+            "timeout": timeout,
+            "extra_body": extra_body,
+            "reasoning_config": reasoning_config,
+            "task": task,
+        }
+
+    auxiliary._build_call_kwargs = build  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+    return auxiliary, build
+
+
+def test_install_preserves_a_smaller_auxiliary_output_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auxiliary, _ = install_fake_hermes(monkeypatch)
+    counter = Counter(12_345)
+
+    cleanup = install(runtime(counter))
+    assert callable(cleanup)
+    result = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "summarize"}],
+        temperature=0.25,
+        max_tokens=2048,
+        tools=[{"type": "function"}],
+        timeout=3600,
+        extra_body={"answer": 42},
+        reasoning_config={"effort": "high"},
+        base_url="https://inference.invalid/v1",
+        task="compression",
+    )
+
+    assert result == {
+        "model": "qwen-test",
+        "messages": [{"role": "user", "content": "summarize"}],
+        "temperature": 0.25,
+        "tools": [{"type": "function"}],
+        "timeout": 3600,
+        "extra_body": {"answer": 42},
+        "reasoning_config": {"effort": "high"},
+        "task": "compression",
+        "max_tokens": 2048,
+    }
+    assert counter.requests == [result]
+
+
+def test_auxiliary_without_a_caller_bound_uses_the_free_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auxiliary, _ = install_fake_hermes(monkeypatch)
+    install(runtime(Counter(12_345)))
+
+    result = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "title"}],
+    )
+
+    assert result["max_tokens"] == 64_000 - 12_345
+
+
+@pytest.mark.parametrize("caller_cap", [None, 2048])
+def test_auxiliary_uses_hermes_provider_output_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    caller_cap: int | None,
+) -> None:
+    """Use Hermes' own model-aware selector for omitted output fields.
+
+    Hermes deliberately omits an auxiliary cap before choosing a provider's
+    accepted wire alias.  New OpenAI models reject the generic ``max_tokens``
+    field, so both bounded and unbounded calls must seed dynamic budgeting with
+    ``max_completion_tokens`` when Hermes selects it.
+    """
+
+    auxiliary, _ = install_fake_hermes(monkeypatch)
+    selections: list[tuple[int, str]] = []
+
+    def select(value: int, *, model: str) -> dict[str, int]:
+        selections.append((value, model))
+        return {"max_completion_tokens": value}
+
+    auxiliary.auxiliary_max_tokens_param = select  # type: ignore[attr-defined]
+    install(runtime(Counter(12_345)))
+
+    result = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "title"}],
+        max_tokens=caller_cap,
+    )
+
+    seed = 64_000 if caller_cap is None else caller_cap
+    assert selections == [(seed, "qwen-test")]
+    assert result["max_completion_tokens"] == min(seed, 64_000 - 12_345)
+    assert "max_tokens" not in result
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        lambda value, **context: {"max_tokens": False},
+        lambda value, **context: (_ for _ in ()).throw(RuntimeError("boom")),
+    ],
+)
+def test_auxiliary_falls_back_from_an_invalid_hermes_output_selector(
+    selector: Any,
+) -> None:
+    """Keep auxiliary requests usable when a Hermes selector is incompatible.
+
+    The helper is a private Hermes API and may be absent, raise, or return an
+    invalid cap during a version transition.  Such failures must degrade to
+    the long-supported ``max_tokens`` field rather than disabling all
+    auxiliary calls before they reach the provider.
+    """
+
+    def build(provider: str, model: str, messages: list[Any]) -> dict[str, Any]:
+        del provider
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(
+        runtime(Counter(12_345)),
+        build,
+        selector,
+    )("custom", "qwen-test", [{"role": "user", "content": "title"}])
+
+    assert result["max_tokens"] == 64_000 - 12_345
+
+
+@pytest.mark.parametrize("stale_signature", [False, True])
+def test_auxiliary_wrapper_accepts_additive_hermes_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+    stale_signature: bool,
+) -> None:
+    """Forward newer Hermes arguments or fail open on stale introspection.
+
+    Hermes 2026.8 added ``reasoning_config`` and ``task`` to the private
+    auxiliary builder used by every sync and async call path.  A wrapper that
+    duplicates the older signature raises ``TypeError`` before any provider
+    request, so incontext must transparently forward additive parameters.  A
+    decorated builder can accept them while retaining an older ``__signature__``;
+    once Hermes has built the request, that metadata drift must only skip
+    budgeting rather than fail the otherwise valid auxiliary call.
+    """
+
+    auxiliary, builder = install_fake_hermes(monkeypatch)
+    if stale_signature:
+        builder.__signature__ = Signature(  # type: ignore[attr-defined]
+            [
+                Parameter(name, Parameter.POSITIONAL_OR_KEYWORD)
+                for name in ("provider", "model", "messages")
+            ],
+        )
+    counter = Counter(12_345)
+    install(runtime(counter))
+
+    result = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "reason"}],
+        reasoning_config={"effort": "high"},
+        task="compression",
+    )
+
+    assert result["reasoning_config"] == {"effort": "high"}
+    assert result["task"] == "compression"
+    assert ("max_tokens" in result) is not stale_signature
+    assert len(counter.requests) == (0 if stale_signature else 1)
+
+
+def test_auxiliary_variadic_builder_without_optional_output_cap() -> None:
+    """Resolve omitted names safely from a generic ``**kwargs`` signature.
+
+    Decorators and future Hermes adapters may expose the request builder as a
+    variadic callable.  When no caller cap is present, argument discovery must
+    fall through cleanly and still apply the full dynamic remainder rather than
+    mistaking an empty kwargs mapping for an incompatible signature.
+    """
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        **options: Any,
+    ) -> dict[str, Any]:
+        del provider, options
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(runtime(Counter(12_345)), build)(
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "title"}],
+    )
+
+    assert result["max_tokens"] == 64_000 - 12_345
+
+
+def test_auxiliary_wrapper_preserves_hermes_output_field() -> None:
+    """Respect a provider-specific cap already emitted by Hermes.
+
+    On newer OpenAI-family models Hermes emits ``max_completion_tokens``.
+    Reintroducing the caller's generic ``max_tokens`` would overwrite that
+    validated provider choice and cause HTTP 400 on the auxiliary request.
+    """
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        del provider, max_tokens
+        return {
+            "model": model,
+            "messages": messages,
+            "max_completion_tokens": 2048,
+        }
+
+    result = _AuxiliaryBudget(runtime(Counter(12_345)), build)(
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "summarize"}],
+        max_tokens=4096,
+    )
+
+    assert result["max_completion_tokens"] == 2048
+    assert "max_tokens" not in result
+
+
+def test_auxiliary_wrapper_ignores_a_different_fallback_model() -> None:
+    """Never tokenize an auxiliary fallback with the primary model backend.
+
+    Hermes can retry an auxiliary task on a different provider and model while
+    the process-wide incontext runtime still points at the primary vLLM model.
+    Applying that tokenizer and context window to the fallback would corrupt
+    its request; the original provider kwargs must pass through untouched.
+    """
+
+    counter = Counter(12_345)
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        del provider, max_tokens
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(runtime(counter), build)(
+        "openai",
+        "fallback-model",
+        [{"role": "user", "content": "retry"}],
+        max_tokens=4096,
+    )
+
+    assert result == {
+        "model": "fallback-model",
+        "messages": [{"role": "user", "content": "retry"}],
+    }
+    assert counter.requests == []
+
+
+def test_auxiliary_wrapper_ignores_same_model_on_another_route() -> None:
+    """Distinguish a fallback endpoint even when it reuses the model alias.
+
+    Hermes fallback destinations carry provider and base URL independently of
+    the model name.  Tokenizing ``shared-model`` on the primary local vLLM is
+    still wrong when the request is headed to an external provider that happens
+    to expose the same alias.
+    """
+
+    counter = Counter(12_345)
+    scoped_runtime = DynamicOutputBudget(
+        Settings(
+            model_name="qwen-test",
+            context_length=65_536,
+            compression_window=64_000,
+            fallback_margin_tokens=1024,
+            provider="custom",
+            base_url="https://primary.invalid/v1",
+        ),
+        counter,
+    )
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        base_url: str | None = None,
+    ) -> dict[str, Any]:
+        del provider, base_url
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(scoped_runtime, build)(
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "retry"}],
+        base_url="https://fallback.invalid/v1",
+    )
+
+    assert result == {
+        "model": "qwen-test",
+        "messages": [{"role": "user", "content": "retry"}],
+    }
+    assert counter.requests == []
+
+
+def test_auxiliary_budgets_synthetic_main_agent_fallback_label() -> None:
+    """Treat Hermes' main-agent fallback label as the configured primary route.
+
+    When an auxiliary provider fails, Hermes' final safety net resolves the
+    real main-model client but calls its builder with the diagnostic label
+    ``main-agent(custom)``.  Its model and base URL still identify the primary
+    deployment exactly; rejecting only the synthetic label loses both exact
+    tokenization and the bounded summary cap that Hermes omitted upstream.
+    """
+
+    counter = Counter(12_345)
+    scoped_runtime = DynamicOutputBudget(
+        Settings(
+            model_name="qwen-test",
+            context_length=65_536,
+            compression_window=64_000,
+            fallback_margin_tokens=1024,
+            provider="custom",
+            base_url="https://primary.invalid/v1",
+        ),
+        counter,
+    )
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        max_tokens: int | None = None,
+        base_url: str | None = None,
+    ) -> dict[str, Any]:
+        del provider, max_tokens, base_url
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(scoped_runtime, build)(
+        "main-agent(custom)",
+        "qwen-test",
+        [{"role": "user", "content": "compression summary"}],
+        max_tokens=2048,
+        base_url="https://primary.invalid/v1",
+    )
+
+    assert result["max_tokens"] == 2048
+    assert len(counter.requests) == 1
+
+
+def test_auxiliary_wrapper_ignores_same_endpoint_on_another_provider() -> None:
+    """Use provider identity as well as the normalized endpoint URL.
+
+    Two Hermes providers may share a gateway URL but apply different wire
+    contracts and model routing.  Matching only the URL and model would still
+    let the primary backend rewrite a fallback request owned by another route.
+    """
+
+    counter = Counter(12_345)
+    scoped_runtime = DynamicOutputBudget(
+        Settings(
+            model_name="qwen-test",
+            context_length=65_536,
+            compression_window=64_000,
+            fallback_margin_tokens=1024,
+            provider="custom",
+            base_url="https://shared.invalid/v1",
+        ),
+        counter,
+    )
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        base_url: str | None = None,
+    ) -> dict[str, Any]:
+        del provider, base_url
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(scoped_runtime, build)(
+        "openai",
+        "qwen-test",
+        [{"role": "user", "content": "retry"}],
+        base_url="https://shared.invalid/v1",
+    )
+
+    assert "max_tokens" not in result
+    assert counter.requests == []
+
+
+def test_auxiliary_accepts_canonical_equivalent_route() -> None:
+    """Match the configured endpoint after HTTP-client canonicalization.
+
+    Hermes passes its auxiliary client's rendered URL and normalized provider.
+    Lowercasing DNS hosts, removing the default HTTPS port, or appending a slash
+    does not change route identity, so those transformations must not silently
+    bypass exact budgeting for the configured primary endpoint.
+    """
+
+    counter = Counter(12_345)
+    scoped_runtime = DynamicOutputBudget(
+        Settings(
+            model_name="qwen-test",
+            context_length=65_536,
+            compression_window=64_000,
+            fallback_margin_tokens=1024,
+            provider="custom",
+            base_url="https://primary.invalid/v1",
+        ),
+        counter,
+    )
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        base_url: str | None = None,
+    ) -> dict[str, Any]:
+        del provider, base_url
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(scoped_runtime, build)(
+        " Custom ",
+        "qwen-test",
+        [{"role": "user", "content": "primary"}],
+        base_url="https://PRIMARY.INVALID:443/v1/",
+    )
+
+    assert result["max_tokens"] == 64_000 - 12_345
+    assert len(counter.requests) == 1
+
+
+def test_auxiliary_runtime_resolver_tracks_the_active_profile() -> None:
+    """Resolve the profile-scoped runtime at call time, not installation time.
+
+    A single process-global Hermes builder wrapper serves multiple active homes
+    in 2026.8.  The resolver must therefore be invoked for every request so a
+    profile switch cannot retain the previous profile's backend and window.
+    """
+
+    active = runtime(Counter(12_345))
+    calls: list[None] = []
+
+    def resolve() -> DynamicOutputBudget:
+        calls.append(None)
+        return active
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+    ) -> dict[str, Any]:
+        del provider
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(resolve, build)(
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "profile"}],
+    )
+
+    assert result["max_tokens"] == 64_000 - 12_345
+    assert calls == [None]
+
+
+def test_auxiliary_skips_profiles_without_an_active_plugin_owner() -> None:
+    """Preserve Hermes' request for a profile where incontext is disabled.
+
+    One imported auxiliary builder is shared by all profile managers in the
+    process.  If the active home's resolver returns no registered runtime, the
+    wrapper must return the original provider kwargs unchanged and avoid any
+    tokenizer request owned by another profile.
+    """
+
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        **options: Any,
+    ) -> dict[str, Any]:
+        return {
+            "provider": provider,
+            "model": model,
+            "messages": messages,
+            **options,
+        }
+
+    result = _AuxiliaryBudget(lambda: None, build)(
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "private"}],
+        max_tokens=2048,
+    )
+
+    assert result == {
+        "provider": "custom",
+        "model": "qwen-test",
+        "messages": [{"role": "user", "content": "private"}],
+        "max_tokens": 2048,
+    }
+
+
+@given(
+    prompt_tokens=st.integers(min_value=1, max_value=63_999),
+    caller_cap=st.integers(min_value=1, max_value=100_000),
+)
+def test_auxiliary_budget_never_increases_the_caller_cap(
+    prompt_tokens: int,
+    caller_cap: int,
+) -> None:
+    def build(
+        provider: str,
+        model: str,
+        messages: list[Any],
+        **options: Any,
+    ) -> dict[str, Any]:
+        del provider, options
+        return {"model": model, "messages": messages}
+
+    result = _AuxiliaryBudget(runtime(Counter(prompt_tokens)), build)(
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "property"}],
+        max_tokens=caller_cap,
+    )
+
+    assert result["max_tokens"] == min(caller_cap, 64_000 - prompt_tokens)
+
+
+def test_auxiliary_fails_open_when_compression_is_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auxiliary, _ = install_fake_hermes(monkeypatch)
+    install(runtime(Counter(64_000)))
+
+    result = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "oversized"}],
+        max_tokens=2048,
+    )
+
+    assert "max_tokens" not in result
+
+
+def test_install_is_idempotent_and_updates_the_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auxiliary, _ = install_fake_hermes(monkeypatch)
+    first = Counter(10_000)
+    second = Counter(20_000)
+
+    first_cleanup = install(runtime(first))
+    second_cleanup = install(runtime(second))
+    assert callable(first_cleanup)
+    assert callable(second_cleanup)
+    result = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "latest"}],
+    )
+
+    assert result["max_tokens"] == 44_000
+    assert first.requests == []
+    assert second.requests == [
+        {
+            "model": "qwen-test",
+            "messages": [{"role": "user", "content": "latest"}],
+            "temperature": None,
+            "tools": None,
+            "timeout": 30.0,
+            "extra_body": None,
+            "reasoning_config": None,
+            "task": None,
+            "max_tokens": 64_000,
+        }
+    ]
+
+
+def test_latest_auxiliary_owner_cleanup_restores_previous_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore the surviving profile's runtime when the newest owner unloads.
+
+    Hermes may load two plugin managers into one process, so the process-wide
+    auxiliary builder temporarily follows the most recently installed owner.
+    Unloading that owner must reveal the earlier runtime again; retaining the
+    removed runtime would tokenize later requests with a stale model, backend,
+    or compression window even though its profile no longer owns the plugin.
+    """
+
+    auxiliary, _ = install_fake_hermes(monkeypatch)
+    first = Counter(10_000)
+    second = Counter(20_000)
+    first_cleanup = install(runtime(first))
+    second_cleanup = install(runtime(second))
+    assert callable(first_cleanup)
+    assert callable(second_cleanup)
+
+    newest = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "newest"}],
+    )
+    second_cleanup()
+    restored = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "restored"}],
+    )
+
+    assert newest["max_tokens"] == 44_000
+    assert restored["max_tokens"] == 54_000
+    assert len(first.requests) == 1
+    assert len(second.requests) == 1
+
+
+def test_cleanup_restores_builder_after_the_last_plugin_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the global wrapper until every profile unloads, then restore it.
+
+    Hermes 2026.8 can load one entry-point plugin for multiple profile-scoped
+    managers in a single process.  Unloading either owner must not disable the
+    other, while the final callback must conditionally restore the exact
+    original builder and remain safe if invoked twice.
+    """
+
+    auxiliary, original = install_fake_hermes(monkeypatch)
+    first_cleanup = install(runtime(Counter(100)))
+    second_cleanup = install(runtime(Counter(200)))
+    assert callable(first_cleanup)
+    assert callable(second_cleanup)
+    wrapper = auxiliary._build_call_kwargs  # type: ignore[attr-defined]
+
+    first_cleanup()
+    assert auxiliary._build_call_kwargs is wrapper  # type: ignore[attr-defined]
+    first_cleanup()
+    assert auxiliary._build_call_kwargs is wrapper  # type: ignore[attr-defined]
+
+    second_cleanup()
+    assert auxiliary._build_call_kwargs is original  # type: ignore[attr-defined]
+
+
+def test_cleanup_never_overwrites_a_later_auxiliary_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Condition restoration on ownership of the current Hermes binding.
+
+    Another plugin may replace the builder after incontext registers.  Its
+    callable must survive incontext unload; cleanup only releases internal
+    ownership and must never put an older function back over newer state.
+    """
+
+    auxiliary, original = install_fake_hermes(monkeypatch)
+    first = Counter(100)
+    cleanup = install(runtime(first))
+    assert callable(cleanup)
+    stale_wrapper = auxiliary._build_call_kwargs  # type: ignore[attr-defined]
+
+    replacement = lambda *args, **kwargs: {}  # noqa: E731
+    auxiliary._build_call_kwargs = replacement  # type: ignore[attr-defined]
+    cleanup()
+
+    assert auxiliary._build_call_kwargs is replacement  # type: ignore[attr-defined]
+
+    auxiliary._build_call_kwargs = stale_wrapper  # type: ignore[attr-defined]
+    second = Counter(200)
+    second_cleanup = install(runtime(second))
+    assert callable(second_cleanup)
+    result = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [],
+    )
+
+    assert result["max_tokens"] == 64_000 - 200
+    assert first.requests == []
+    assert len(second.requests) == 1
+    second_cleanup()
+    assert auxiliary._build_call_kwargs is original  # type: ignore[attr-defined]
+
+
+def test_final_owner_release_cannot_race_auxiliary_configuration() -> None:
+    """Use one coherent owner snapshot during a free-threaded request.
+
+    Final profile cleanup can replace the immutable owner tuple while an
+    auxiliary call selects its runtime and output-field helper.  Reading the
+    attribute once for truthiness and again for indexing could observe two
+    tuples and either raise or mix profile configuration; the in-flight call
+    must retain the complete pre-cleanup snapshot.
+    """
+
+    checked = threading.Event()
+    resume = threading.Event()
+
+    class BlockingOwners(tuple):
+        def __bool__(self) -> bool:
+            checked.set()
+            assert resume.wait(timeout=2)
+            return super().__len__() != 0
+
+    def build(provider: str, model: str, messages: list[Any]) -> dict[str, Any]:
+        del provider
+        return {"model": model, "messages": messages}
+
+    counter = Counter(100)
+    active = runtime(counter)
+    wrapper = _AuxiliaryBudget(lambda: None, build)
+    owner = object()
+    wrapper.acquire(owner, active, None)
+    wrapper._owners = BlockingOwners(wrapper._owners)
+    results: list[dict[str, Any]] = []
+    errors: list[BaseException] = []
+
+    def call() -> None:
+        try:
+            results.append(wrapper("custom", "qwen-test", []))
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    worker = threading.Thread(target=call)
+    worker.start()
+    assert checked.wait(timeout=2)
+    wrapper.release(owner)
+    resume.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert results[0]["max_tokens"] == 64_000 - 100
+    assert len(counter.requests) == 1
+
+
+def test_stale_auxiliary_cleanup_cannot_remove_a_new_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ignore an unload callback whose wrapper is no longer globally active.
+
+    Force rediscovery can replace the module binding and establish a new owner
+    before an older manager disposes its ledger.  The stale callback must not
+    decrement or restore the new installation's reference count, but it must
+    still release its own owner and restore its now-detached module.
+    """
+
+    stale_auxiliary, stale_original = install_fake_hermes(monkeypatch)
+    stale_cleanup = install(runtime(Counter(100)))
+    assert callable(stale_cleanup)
+    stale_wrapper = stale_auxiliary._build_call_kwargs  # type: ignore[attr-defined]
+
+    second_auxiliary, _ = install_fake_hermes(monkeypatch)
+    active_cleanup = install(runtime(Counter(200)))
+    assert callable(active_cleanup)
+    active_wrapper = second_auxiliary._build_call_kwargs  # type: ignore[attr-defined]
+
+    stale_cleanup()
+    assert not stale_wrapper.owned
+    assert stale_auxiliary._build_call_kwargs is stale_original  # type: ignore[attr-defined]
+    assert second_auxiliary._build_call_kwargs is active_wrapper  # type: ignore[attr-defined]
+
+
+def test_install_reports_absent_hermes(caplog: pytest.LogCaptureFixture) -> None:
+    original = sys.modules.pop("agent", None)
+    auxiliary = sys.modules.pop("agent.auxiliary_client", None)
+    try:
+        assert install(runtime(Counter(1))) is None
+    finally:
+        if original is not None:
+            sys.modules["agent"] = original
+        if auxiliary is not None:
+            sys.modules["agent.auxiliary_client"] = auxiliary
+    assert "Hermes is not installed" in caplog.text
+
+
+def test_install_skips_a_missing_private_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Keep public middleware usable when Hermes moves its private builder.
+
+    Importing ``agent.auxiliary_client`` only proves that Hermes is installed;
+    it does not guarantee that the installed version still exposes
+    ``_build_call_kwargs``.  This monkeypatch is an optional compatibility
+    layer, so a missing private binding must warn and return ``None`` rather
+    than raising ``KeyError`` and rolling back the stable public middleware.
+    """
+
+    agent = types.ModuleType("agent")
+    agent.__path__ = []  # type: ignore[attr-defined]
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+
+    assert install(lambda: None) is None
+    assert "Hermes auxiliary builder API changed" in caplog.text
+
+
+def test_install_skips_an_uninspectable_private_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Keep public middleware usable when a callable lacks a signature.
+
+    A decorated or extension-backed Hermes builder can remain callable while
+    ``inspect.signature`` raises ``TypeError`` or ``ValueError``.  This private
+    compatibility hook must warn, preserve the original binding, and return
+    ``None``; propagating the inspection failure rolls back the stable public
+    middleware and disables the whole plugin.
+    """
+
+    class UninspectableBuilder:
+        @property
+        def __signature__(self) -> Any:
+            raise ValueError("opaque callable")
+
+        def __call__(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            del args, kwargs
+            return {}
+
+    agent = types.ModuleType("agent")
+    agent.__path__ = []  # type: ignore[attr-defined]
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+    original = UninspectableBuilder()
+    auxiliary._build_call_kwargs = original  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+
+    assert install(lambda: None) is None
+    assert auxiliary._build_call_kwargs is original  # type: ignore[attr-defined]
+    assert "auxiliary builder signature is unavailable" in caplog.text

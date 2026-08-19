@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 import types
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -49,15 +50,16 @@ class Counter(Backend):
     [
         (64_000, 1_000, 0, 63_000),
         (64_000, 1_000, 1024, 61_976),
-        (64_000, 64_000, 0, 1),
-        (64_000, 70_000, 0, 1),
+        (64_000, 0, 0, 64_000),
+        (64_000, 64_000, 0, None),
+        (64_000, 70_000, 0, None),
     ],
 )
 def test_compute_max_tokens_boundaries(
     window: int,
     prompt: int,
     margin: int,
-    expected: int,
+    expected: int | None,
 ) -> None:
     assert budget.compute_max_tokens(window, prompt, safety_margin=margin) == expected
 
@@ -66,7 +68,7 @@ def test_compute_max_tokens_boundaries(
     ("window", "prompt", "margin", "message"),
     [
         (0, 1, 0, "compression_window"),
-        (1, 0, 0, "prompt_tokens"),
+        (1, -1, 0, "prompt_tokens"),
         (1, 1, -1, "safety_margin"),
     ],
 )
@@ -82,13 +84,12 @@ def test_compute_max_tokens_rejects_invalid_inputs(
 
 @given(
     window=st.integers(min_value=1, max_value=1_000_000),
-    prompt=st.integers(min_value=1, max_value=2_000_000),
+    prompt=st.integers(min_value=0, max_value=2_000_000),
     margin=st.integers(min_value=0, max_value=100_000),
 )
 def test_compute_max_tokens_invariants(window: int, prompt: int, margin: int) -> None:
     result = budget.compute_max_tokens(window, prompt, safety_margin=margin)
-    assert result >= 1
-    assert result == max(1, window - prompt - margin)
+    assert result == (window - prompt - margin if window > prompt + margin else None)
 
 
 def install_estimator(monkeypatch: pytest.MonkeyPatch, value: Any) -> None:
@@ -127,6 +128,49 @@ def test_estimate_request_tokens_rough_handles_invalid_result(
     assert budget.estimate_request_tokens_rough(request) == 1
 
 
+def test_rough_fallback_counts_extra_body_prompt_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Count the provider-visible prompt when exact tokenization fails.
+
+    OpenAI clients shallow-merge ``extra_body`` over generated request fields,
+    and the exact backend mirrors that rule for messages and tools.  Hermes'
+    rough estimator must receive the same effective values during a tokenizer
+    outage; budgeting from superseded top-level content can otherwise allocate
+    output beyond the compression boundary by an unbounded amount.
+    """
+
+    top_messages = [{"role": "user", "content": "superseded"}]
+    wire_messages = [{"role": "user", "content": f"wire-{index}"} for index in range(7)]
+    wire_tools = [{"type": "function", "function": {"name": "wire"}}]
+    agent_package = types.ModuleType("agent")
+    agent_package.__path__ = []  # type: ignore[attr-defined]
+    metadata_module = types.ModuleType("agent.model_metadata")
+
+    def estimator(messages: Any, *, tools: Any) -> int:
+        assert messages is wire_messages
+        assert tools is wire_tools
+        return 700
+
+    metadata_module.estimate_request_tokens_rough = estimator  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent_package)
+    monkeypatch.setitem(sys.modules, "agent.model_metadata", metadata_module)
+
+    assert (
+        budget.estimate_request_tokens_rough(
+            {
+                "messages": top_messages,
+                "tools": [{"type": "function"}],
+                "extra_body": {
+                    "messages": wire_messages,
+                    "tools": wire_tools,
+                },
+            },
+        )
+        == 700
+    )
+
+
 def test_runtime_keeps_injected_backend_and_default_estimator(
     runtime_settings: Settings,
 ) -> None:
@@ -136,7 +180,7 @@ def test_runtime_keeps_injected_backend_and_default_estimator(
     assert runtime.rough_estimator is budget.estimate_request_tokens_rough
 
 
-def test_runtime_exact_count_rewrites_all_output_aliases(
+def test_runtime_exact_count_preserves_smallest_existing_output_cap(
     runtime_settings: Settings,
 ) -> None:
     counter = Counter(10_000)
@@ -156,7 +200,7 @@ def test_runtime_exact_count_rewrites_all_output_aliases(
     result = runtime(request=request, session_id="ignored")
     assert result is not None
     rewritten = result["request"]
-    assert rewritten["max_tokens"] == 45_705
+    assert rewritten["max_tokens"] == 10
     assert "max_completion_tokens" not in rewritten
     assert "max_output_tokens" not in rewritten
     assert rewritten["temperature"] == 0.5
@@ -164,6 +208,530 @@ def test_runtime_exact_count_rewrites_all_output_aliases(
     assert counter.requests == [(request, 65_536)]
     assert result["source"] == "incontext"
     assert "unit-backend" in result["reason"]
+
+
+def test_runtime_uses_all_free_space_without_an_existing_output_cap(
+    runtime_settings: Settings,
+) -> None:
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(10_000))
+    result = runtime(request={"model": "qwen", "messages": []})
+    assert result is not None
+    assert result["request"]["max_tokens"] == 45_705
+
+
+def test_runtime_budgets_reusable_message_collections(
+    runtime_settings: Settings,
+) -> None:
+    """Budget message tuples that the OpenAI client serializes as arrays.
+
+    Chat Completions declares messages as an iterable and materializes a tuple
+    before JSON encoding.  Returning early solely because Hermes supplied that
+    reusable sequence skips the dynamic cap for an otherwise valid request;
+    incontext must copy it without mutating the caller-owned collection.
+    """
+
+    messages = ({"role": "user", "content": "tuple prompt"},)
+    counter = Counter(10_000)
+    runtime = budget.DynamicOutputBudget(runtime_settings, counter)
+
+    result = runtime(request={"model": "qwen", "messages": messages})
+
+    assert result is not None
+    assert result["request"]["messages"] == list(messages)
+    assert result["request"]["max_tokens"] == 45_705
+    assert messages == ({"role": "user", "content": "tuple prompt"},)
+
+
+def test_runtime_cleans_output_caps_from_read_only_extra_body_mapping(
+    runtime_settings: Settings,
+) -> None:
+    """Honor every reusable Mapping accepted by OpenAI for extra_body.
+
+    The SDK shallow-merges ``extra_body`` after its generated request, so a
+    ``MappingProxyType`` is just as authoritative as a dict.  Leaving its
+    larger ``max_tokens`` intact overwrites the safe dynamic cap on the final
+    wire.  The rewrite must copy and clean the mapping without mutating the
+    caller-owned object.
+    """
+
+    nested_messages = ({"role": "user", "content": "wire prompt"},)
+    nested = MappingProxyType(
+        {
+            "messages": nested_messages,
+            "max_tokens": 1000,
+            "temperature": 0.25,
+        },
+    )
+    request = {
+        "model": "qwen",
+        "messages": [],
+        "extra_body": nested,
+    }
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(55_635))
+
+    result = runtime(request=request)
+
+    assert result is not None
+    rewritten = result["request"]
+    assert rewritten["max_tokens"] == 70
+    assert rewritten["extra_body"] == {
+        "messages": list(nested_messages),
+        "temperature": 0.25,
+    }
+    assert {**rewritten, **rewritten["extra_body"]}["max_tokens"] == 70
+    assert dict(nested) == {
+        "messages": nested_messages,
+        "max_tokens": 1000,
+        "temperature": 0.25,
+    }
+
+
+def test_runtime_rejects_model_override_in_read_only_extra_body_mapping(
+    runtime_settings: Settings,
+) -> None:
+    """Scope Mapping-based wire overrides before selecting a tokenizer.
+
+    OpenAI applies a read-only mapping exactly like a dict during its final
+    shallow merge.  Ignoring a nested model would count the fallback request
+    with the primary backend and context window even though a different model
+    is provider-visible.
+    """
+
+    counter = Counter(100)
+    runtime = budget.DynamicOutputBudget(runtime_settings, counter)
+
+    assert (
+        runtime(
+            request={
+                "model": "qwen",
+                "messages": [],
+                "extra_body": MappingProxyType({"model": "fallback"}),
+            },
+        )
+        is None
+    )
+    assert counter.requests == []
+
+
+def test_runtime_accepts_an_exact_zero_token_truncated_prompt(
+    runtime_settings: Settings,
+) -> None:
+    """Allocate the complete compression window after provider truncation.
+
+    vLLM accepts ``truncate_prompt_tokens=0`` and consequently sends no prompt
+    token IDs to generation.  Its exact backend legitimately returns zero in
+    that case; treating zero as an invalid estimate crashes middleware before
+    it can preserve the provider's full safe output allowance.
+    """
+
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(0))
+
+    result = runtime(request={"model": "qwen", "messages": []})
+
+    assert result is not None
+    assert result["request"]["max_tokens"] == runtime_settings.compression_window
+
+
+def test_runtime_applies_an_additional_provider_output_limit() -> None:
+    """Never emit a dynamic cap rejected by a coupled provider schema.
+
+    Some inference engines validate prompt truncation against the final output
+    allowance, independently of the counted prompt.  The generic compression
+    remainder can then be numerically safe yet invalid on the wire.  A backend
+    limit must lower that remainder without increasing a caller cap or leaking
+    provider-specific arithmetic into the middleware.
+    """
+
+    class LimitedCounter(Counter):
+        def output_budget_limit(
+            self,
+            request: dict[str, Any],
+            *,
+            context_length: int,
+        ) -> int:
+            assert request["truncate_prompt_tokens"] == 90
+            assert context_length == 100
+            return 10
+
+    runtime = budget.DynamicOutputBudget(
+        Settings(
+            model_name="qwen",
+            context_length=100,
+            compression_window=100,
+            fallback_margin_tokens=1,
+            provider="",
+            base_url="",
+        ),
+        LimitedCounter(10),
+    )
+
+    result = runtime(
+        request={
+            "model": "qwen",
+            "messages": [],
+            "truncate_prompt_tokens": 90,
+        },
+    )
+
+    assert result is not None
+    assert result["request"]["max_tokens"] == 10
+
+
+def test_runtime_fails_open_when_provider_output_space_is_exhausted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Avoid inserting a zero-token completion rejected by the provider.
+
+    A provider constraint can consume the entire model window even while the
+    ordinary compression remainder is positive.  Returning the original
+    request lets Hermes/provider error handling decide how to recover; writing
+    a zero or negative cap would manufacture an invalid request in middleware.
+    """
+
+    class ExhaustedCounter(Counter):
+        def output_budget_limit(
+            self,
+            request: dict[str, Any],
+            *,
+            context_length: int,
+        ) -> int:
+            del request, context_length
+            return 0
+
+    runtime = budget.DynamicOutputBudget(
+        Settings(
+            model_name="qwen",
+            context_length=100,
+            compression_window=100,
+            fallback_margin_tokens=1,
+            provider="",
+            base_url="",
+        ),
+        ExhaustedCounter(10),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert runtime(request={"model": "qwen", "messages": []}) is None
+    assert "action=requires_compression" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["max_tokens", "max_completion_tokens", "max_output_tokens"],
+)
+def test_runtime_preserves_the_provider_selected_output_field(field: str) -> None:
+    """Keep Hermes' provider-specific wire parameter while lowering its cap.
+
+    Hermes chooses the output field before invoking request middleware.  Newer
+    OpenAI-family models reject legacy ``max_tokens``, while other transports
+    use their own alias; replacing the chosen name can turn a valid request into
+    HTTP 400 even when the numeric dynamic budget is correct.
+    """
+
+    runtime_settings = Settings(
+        model_name="qwen",
+        context_length=65_536,
+        compression_window=55_705,
+        fallback_margin_tokens=1024,
+        provider="",
+        base_url="",
+    )
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(50_000))
+
+    result = runtime(
+        request={
+            "model": "qwen",
+            "messages": [],
+            field: 8192,
+        },
+    )
+
+    assert result is not None
+    assert result["request"][field] == 5705
+    assert set(result["request"]).isdisjoint(
+        set(budget.OUTPUT_BUDGET_FIELDS) - {field},
+    )
+
+
+def test_runtime_uses_backend_supported_output_budget_field() -> None:
+    """Let an inference backend correct an incompatible provider wire alias.
+
+    Hermes can pass a Responses-style ``max_output_tokens`` cap to a custom
+    Chat Completions route.  The numeric cap remains authoritative, but a
+    backend that knows its server ignores that name must be able to emit the
+    equivalent accepted field without leaking server-specific rules into the
+    generic dynamic-budget middleware.
+    """
+
+    class ChatCompletionsCounter(Counter):
+        def output_budget_field(self, requested_field: str) -> str:
+            return (
+                "max_tokens"
+                if requested_field == "max_output_tokens"
+                else requested_field
+            )
+
+    runtime_settings = Settings(
+        model_name="qwen",
+        context_length=65_536,
+        compression_window=55_705,
+        fallback_margin_tokens=1024,
+        provider="",
+        base_url="",
+    )
+    runtime = budget.DynamicOutputBudget(
+        runtime_settings,
+        ChatCompletionsCounter(50_000),
+    )
+
+    result = runtime(
+        request={"model": "qwen", "messages": [], "max_output_tokens": 8192},
+    )
+
+    assert result is not None
+    assert result["request"]["max_tokens"] == 5705
+    assert "max_output_tokens" not in result["request"]
+
+
+@pytest.mark.parametrize(
+    ("failing_hook", "budget_is_applied"),
+    [
+        ("source", True),
+        ("coerce_output_budget", False),
+        ("output_budget_limit", False),
+        ("output_budget_field", False),
+    ],
+)
+def test_runtime_fails_open_when_a_backend_contract_hook_fails(
+    runtime_settings: Settings,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_hook: str,
+    budget_is_applied: bool,
+) -> None:
+    """Keep Hermes running when any third-party backend hook fails.
+
+    Token counting is not the backend's only extension point: provider-specific
+    diagnostics, cap coercion, limits, and output-field selection also execute
+    inside middleware.  Diagnostic failure can use a neutral label; arithmetic
+    failures must leave the request unchanged.  Neither may expose provider
+    details through logs or escape into Hermes.
+    """
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise RuntimeError("secret provider detail")
+
+    request = {"model": "qwen", "messages": [], "max_tokens": 100}
+    backend = Counter(100)
+    target = Counter if failing_hook == "source" else backend
+    replacement = property(fail) if failing_hook == "source" else fail
+    monkeypatch.setattr(target, failing_hook, replacement)
+    runtime = budget.DynamicOutputBudget(runtime_settings, backend)
+
+    with caplog.at_level(logging.WARNING):
+        result = runtime(request=request)
+    assert (result is not None) is budget_is_applied
+    assert ("unknown-backend" in (result or {}).get("reason", "")) is budget_is_applied
+    assert request == {"model": "qwen", "messages": [], "max_tokens": 100}
+    assert "RuntimeError" in caplog.text
+    assert "secret provider detail" not in caplog.text
+
+
+def test_runtime_removes_extra_body_output_cap_override() -> None:
+    """Prevent OpenAI's ``extra_body`` merge from undoing the dynamic budget.
+
+    The OpenAI client shallow-merges ``extra_body`` after normal parameters, so
+    an output alias left there wins on the HTTP wire.  Incontext must include it
+    when selecting the smallest caller cap, move the safe result to the same
+    top-level field, and remove every nested alias without mutating the input.
+    """
+
+    runtime_settings = Settings(
+        model_name="qwen",
+        context_length=1000,
+        compression_window=800,
+        fallback_margin_tokens=10,
+        provider="",
+        base_url="",
+    )
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(100))
+    request = {
+        "model": "qwen",
+        "messages": [],
+        "extra_body": {
+            "max_completion_tokens": 600,
+            "max_tokens": 100_000,
+            "chat_template_kwargs": {"enable_thinking": True},
+        },
+    }
+
+    result = runtime(request=request)
+
+    assert result is not None
+    assert result["request"]["max_completion_tokens"] == 600
+    assert result["request"]["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+    assert request["extra_body"] == {
+        "max_completion_tokens": 600,
+        "max_tokens": 100_000,
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+
+
+def test_nested_smaller_cap_preserves_top_level_provider_field() -> None:
+    """Honor a nested bound without changing Hermes' selected wire parameter.
+
+    Hermes may choose ``max_completion_tokens`` for a model that rejects the
+    legacy alias.  A smaller ``max_tokens`` left in ``extra_body`` still limits
+    the numeric budget because OpenAI clients merge it onto the wire request,
+    but removing that override must emit the minimum through the existing
+    top-level provider field rather than reintroducing the rejected alias.
+    """
+
+    runtime_settings = Settings(
+        model_name="gpt-5-test",
+        context_length=1000,
+        compression_window=800,
+        fallback_margin_tokens=10,
+        provider="",
+        base_url="",
+    )
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(100))
+
+    result = runtime(
+        request={
+            "model": "gpt-5-test",
+            "messages": [],
+            "max_completion_tokens": 600,
+            "extra_body": {"max_tokens": 200},
+        },
+    )
+
+    assert result is not None
+    assert result["request"]["max_completion_tokens"] == 200
+    assert "max_tokens" not in result["request"]
+    assert result["request"]["extra_body"] == {}
+
+
+def test_runtime_rejects_extra_body_model_override(
+    runtime_settings: Settings,
+) -> None:
+    """Never budget a wire-level model override with the primary window.
+
+    OpenAI-compatible clients shallow-merge ``extra_body`` after their normal
+    request fields.  Consequently its model value is the provider-visible
+    route and must take precedence during scoping, just as it does in the
+    bundled backend; otherwise a fallback model receives the primary model's
+    token count and compression-window arithmetic.
+    """
+
+    counter = Counter(100)
+    runtime = budget.DynamicOutputBudget(runtime_settings, counter)
+    request = {
+        "model": runtime_settings.model_name,
+        "messages": [],
+        "extra_body": {"model": "fallback-model"},
+    }
+
+    assert runtime(request=request) is None
+    assert counter.requests == []
+
+
+@pytest.mark.parametrize(
+    "invalid_cap",
+    [None, True, False, 0, -1, 1.5, "2048"],
+)
+def test_runtime_ignores_invalid_existing_output_caps(
+    runtime_settings: Settings,
+    invalid_cap: Any,
+) -> None:
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(10_000))
+    result = runtime(
+        request={
+            "model": "qwen",
+            "messages": [],
+            "max_tokens": invalid_cap,
+        },
+    )
+    assert result is not None
+    assert result["request"]["max_tokens"] == 45_705
+
+
+@given(
+    free_space=st.integers(min_value=1, max_value=50_000),
+    requested_cap=st.integers(min_value=1, max_value=1_000_000),
+)
+def test_existing_output_cap_is_never_increased(
+    free_space: int,
+    requested_cap: int,
+) -> None:
+    runtime_settings = Settings(
+        model_name="qwen",
+        context_length=65_536,
+        compression_window=55_705,
+        fallback_margin_tokens=1024,
+        provider="",
+        base_url="",
+    )
+    prompt_tokens = runtime_settings.compression_window - free_space
+    runtime = budget.DynamicOutputBudget(
+        runtime_settings,
+        Counter(prompt_tokens),
+    )
+    result = runtime(
+        request={
+            "model": "qwen",
+            "messages": [],
+            "max_tokens": requested_cap,
+        },
+    )
+    assert result is not None
+    assert result["request"]["max_tokens"] == min(free_space, requested_cap)
+
+
+@pytest.mark.parametrize("wire_cap", ["5", 5.0])
+def test_runtime_honors_output_caps_coerced_by_backend(
+    wire_cap: Any,
+) -> None:
+    """Never increase a caller cap accepted by the selected provider.
+
+    OpenAI ``extra_body`` values reach provider validation unchanged.  Some
+    compatible servers coerce integer strings and integral floats to integers;
+    ignoring that accepted small bound would delete it and replace it with the
+    much larger dynamic remainder.  The backend contract must own this
+    provider-specific validation while the generic middleware preserves the
+    resulting cap.
+    """
+
+    class CoercingCounter(Counter):
+        def coerce_output_budget(self, value: Any) -> int | None:
+            if isinstance(value, (str, float)):
+                return int(value)
+            return super().coerce_output_budget(value)
+
+    runtime_settings = Settings(
+        model_name="qwen",
+        context_length=1000,
+        compression_window=800,
+        fallback_margin_tokens=10,
+        provider="",
+        base_url="",
+    )
+    runtime = budget.DynamicOutputBudget(runtime_settings, CoercingCounter(100))
+
+    result = runtime(
+        request={
+            "model": "qwen",
+            "messages": [],
+            "extra_body": {"max_tokens": wire_cap},
+        },
+    )
+
+    assert result is not None
+    assert result["request"]["max_tokens"] == 5
+    assert result["request"]["extra_body"] == {}
 
 
 def test_runtime_fallback_reserves_safety_margin(
@@ -186,6 +754,24 @@ def test_runtime_fallback_reserves_safety_margin(
     assert "rough-fallback" in result["reason"]
     assert "private material" not in caplog.text
     assert "secret failure" not in caplog.text
+
+
+@pytest.mark.parametrize("prompt_tokens", [55_705, 65_536])
+def test_runtime_does_not_inject_an_invalid_sentinel_for_full_window(
+    runtime_settings: Settings,
+    prompt_tokens: int,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(prompt_tokens))
+    request = {
+        "model": "qwen",
+        "messages": [{"role": "user", "content": "large prompt"}],
+        "max_tokens": 8192,
+    }
+    with caplog.at_level(logging.WARNING):
+        assert runtime(request=request) is None
+    assert request["max_tokens"] == 8192
+    assert "action=requires_compression" in caplog.text
 
 
 def test_runtime_normalizes_non_positive_fallback_estimate(
@@ -232,6 +818,98 @@ def test_runtime_ignores_unsupported_request_shapes(
     assert runtime(request=payload) is None
 
 
+def test_runtime_ignores_request_for_a_different_model(
+    runtime_settings: Settings,
+) -> None:
+    """Never apply the primary tokenizer and window after a model switch.
+
+    Hermes can route a turn to a session override or fallback model while the
+    process remains alive.  Without a separately configured backend and
+    compression boundary for that model, fail-open is safer than computing an
+    apparently exact cap from the primary model's tokenizer.
+    """
+
+    counter = Counter(100)
+    runtime = budget.DynamicOutputBudget(runtime_settings, counter)
+
+    result = runtime(
+        request={
+            "model": "fallback-model",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    assert result is None
+    assert counter.requests == []
+
+
+def test_runtime_ignores_same_model_on_a_different_provider_route() -> None:
+    """Fail open when middleware context identifies a different endpoint.
+
+    A session fallback may retain the same model alias while changing provider
+    or base URL.  Hermes supplies both values to ``llm_request`` middleware, so
+    incontext must not apply the primary vLLM tokenizer merely because the JSON
+    model string still matches.
+    """
+
+    counter = Counter(100)
+    runtime = budget.DynamicOutputBudget(
+        Settings(
+            model_name="shared-model",
+            context_length=1000,
+            compression_window=800,
+            fallback_margin_tokens=10,
+            provider="custom",
+            base_url="https://primary.invalid/v1",
+        ),
+        counter,
+    )
+    request = {"model": "shared-model", "messages": []}
+
+    assert (
+        runtime(
+            request=request,
+            provider="openai",
+            base_url="https://fallback.invalid/v1",
+        )
+        is None
+    )
+    assert counter.requests == []
+
+
+def test_runtime_accepts_canonical_equivalent_route() -> None:
+    """Budget the primary route after harmless context normalization.
+
+    Middleware context can contain the HTTP client's canonical spelling rather
+    than the literal config value.  Provider case, host case, a default HTTPS
+    port, and a trailing slash must compare as one route so exact budgeting is
+    not accidentally disabled for the configured endpoint.
+    """
+
+    counter = Counter(100)
+    runtime = budget.DynamicOutputBudget(
+        Settings(
+            model_name="shared-model",
+            context_length=1000,
+            compression_window=800,
+            fallback_margin_tokens=10,
+            provider="custom",
+            base_url="https://primary.invalid/v1",
+        ),
+        counter,
+    )
+
+    result = runtime(
+        request={"model": "shared-model", "messages": []},
+        provider=" Custom ",
+        base_url="https://PRIMARY.INVALID:443/v1/",
+    )
+
+    assert result is not None
+    assert result["request"]["max_tokens"] == 700
+    assert len(counter.requests) == 1
+
+
 @given(
     small=st.integers(min_value=1, max_value=40_000),
     growth=st.integers(min_value=1, max_value=40_000),
@@ -240,4 +918,4 @@ def test_budget_never_increases_as_prompt_grows(small: int, growth: int) -> None
     window = 64_000
     small_cap = budget.compute_max_tokens(window, small)
     large_cap = budget.compute_max_tokens(window, small + growth)
-    assert large_cap <= small_cap
+    assert small_cap is None or large_cap is None or large_cap <= small_cap

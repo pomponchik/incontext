@@ -9,8 +9,21 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    uses: ./.github/workflows/lint.yml
+
+  tests-and-coverage:
+    uses: ./.github/workflows/tests_and_coverage.yml
+
+  hermes-e2e:
+    uses: ./.github/workflows/hermes_e2e.yml
+
   pypi-publish:
     name: Build and upload release to PyPI
+    needs:
+      - lint
+      - tests-and-coverage
+      - hermes-e2e
     runs-on: ubuntu-latest
     environment: release
     permissions:
