@@ -307,6 +307,47 @@ def test_build_payload_mirrors_every_prompt_affecting_vllm_option() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "in_extra_body"),
+    [
+        ("tool_choice", "required", False),
+        ("tool_choice", "none", True),
+        ("response_format", {"type": "json_object"}, False),
+        ("response_format", {"type": "json_object"}, True),
+    ],
+)
+def test_count_rejects_prompt_controls_missing_from_tokenize_schema(
+    field: str,
+    value: Any,
+    in_extra_body: bool,
+) -> None:
+    """Use the rough fallback when `/tokenize` cannot mirror generation.
+
+    vLLM generation can expose forced tool choice and response format to its
+    model renderer, but its tokenize request has no corresponding fields.
+    Claiming an exact count for that reduced prompt can over-allocate output;
+    both normal fields and OpenAI's authoritative ``extra_body`` override must
+    therefore fail before transport and let the middleware estimate safely.
+    """
+
+    backend, opener = make_backend()
+    request: dict[str, Any] = {
+        "model": "qwen",
+        "messages": [],
+        "tools": [{"type": "function", "function": {"name": "lookup"}}],
+        "tool_choice": "auto",
+    }
+    if in_extra_body:
+        request["extra_body"] = {field: value}
+    else:
+        request[field] = value
+
+    with pytest.raises(VllmBackend.VllmBackendError, match=field):
+        backend.count(request, context_length=65_536)
+
+    assert opener.calls == []
+
+
 def test_build_payload_applies_extra_body_to_core_chat_fields() -> None:
     """Mirror OpenAI's final shallow merge for model, messages, and tools.
 
@@ -686,6 +727,8 @@ def test_backend_sends_exact_request_and_caches_result() -> None:
         "model": "qwen",
         "messages": [{"role": "user", "content": "Привет"}],
         "tools": [{"type": "function", "function": {"name": "test"}}],
+        "tool_choice": "auto",
+        "response_format": None,
     }
     assert backend.count(request, context_length=65_536) == 321
     assert backend.count(request, context_length=65_536) == 321

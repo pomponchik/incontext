@@ -214,6 +214,11 @@ class VllmBackend(Backend):
         normalized_tools = VllmBackend._normalize_tools(tools)
         if normalized_tools is not None:
             payload["tools"] = normalized_tools
+        VllmBackend._validate_prompt_controls(
+            request,
+            extra_body,
+            normalized_tools,
+        )
         prompt_options = (
             "add_generation_prompt",
             "continue_final_message",
@@ -253,6 +258,28 @@ class VllmBackend(Backend):
             Dict[str, Any],
             VllmBackend._materialize_wire_value(payload),
         )
+
+    @staticmethod
+    def _validate_prompt_controls(
+        request: Dict[str, Any],
+        extra_body: Mapping[str, Any],
+        tools: Optional[List[Any]],
+    ) -> None:
+        """Reject generation controls absent from vLLM's tokenize schema."""
+
+        tool_choice = extra_body.get("tool_choice", request.get("tool_choice"))
+        if tools and tool_choice not in (None, "auto"):
+            raise VllmBackend.VllmBackendError(
+                "vLLM /tokenize cannot mirror prompt-affecting tool_choice",
+            )
+        response_format = extra_body.get(
+            "response_format",
+            request.get("response_format"),
+        )
+        if response_format is not None:
+            raise VllmBackend.VllmBackendError(
+                "vLLM /tokenize cannot mirror prompt-affecting response_format",
+            )
 
     @staticmethod
     def _materialize_wire_value(value: Any) -> Any:
