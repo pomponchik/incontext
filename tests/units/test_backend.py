@@ -77,17 +77,29 @@ def test_public_type_hints_resolve_on_every_supported_python() -> None:
     """
 
     targets = (
+        Backend.source.fget,
         Backend.count,
+        Backend.clear_cache,
+        Backend.output_budget_field,
+        Backend.output_budget_limit,
+        Backend.coerce_output_budget,
+        backends,
         DynamicOutputBudget.__init__,
         DynamicOutputBudget.__call__,
         apply_incontext,
         register,
         VllmBackend.__init__,
+        VllmBackend.source.fget,
         VllmBackend.count,
+        VllmBackend.clear_cache,
+        VllmBackend.output_budget_field,
+        VllmBackend.output_budget_limit,
+        VllmBackend.coerce_output_budget,
         load_settings,
     )
 
     for target in targets:
+        assert target is not None
         assert get_type_hints(target)
 
 
