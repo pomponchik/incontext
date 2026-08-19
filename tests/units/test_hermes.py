@@ -231,6 +231,113 @@ def test_concurrent_registration_retains_its_validated_runtime(
     assert hermes._runtimes == {"profile-a": runtime}
 
 
+def test_profile_runtime_builder_can_query_active_runtime_without_deadlock(
+    runtime_settings: Settings,
+) -> None:
+    """Do not execute backend extension code while holding the runtime mutex.
+
+    ``build_runtime`` constructs a selected third-party backend entry point.
+    Such an adapter may query ``get_active_runtime`` while composing itself; on
+    first registration that lookup should observe no active owner and let
+    construction continue.  Holding the non-reentrant lock across extension
+    code blocks forever.  The finished runtime and owner must still become
+    visible together after construction.
+    """
+
+    runtime = mock.Mock()
+    runtime.settings = runtime_settings
+    context = Context()
+    observations: list[Any] = []
+
+    def build() -> DynamicOutputBudget:
+        observations.append(hermes.get_active_runtime())
+        return runtime
+
+    with mock.patch.object(
+        hermes,
+        "_runtime_key",
+        return_value="profile-a",
+    ), mock.patch.object(
+        hermes,
+        "build_runtime",
+        side_effect=build,
+    ), mock.patch.object(
+        hermes,
+        "install_exact_preflight",
+        return_value=None,
+    ), mock.patch.object(
+        hermes,
+        "install_auxiliary_budget",
+        return_value=None,
+    ):
+        worker = threading.Thread(target=hermes.register, args=(context,), daemon=True)
+        worker.start()
+        worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert observations == [None]
+    assert hermes._runtimes == {"profile-a": runtime}
+    assert hermes._active_profiles == {"profile-a": 1}
+
+
+def test_concurrent_runtime_publication_keeps_the_existing_winner() -> None:
+    """Discard duplicate candidates published after another builder wins.
+
+    Extension construction now runs outside the runtime mutex, so two callers
+    can produce candidates concurrently.  Each cache path must recheck under
+    lock and retain the first published object rather than overwrite the
+    runtime already used by another request or profile owner.
+    """
+
+    candidate = mock.create_autospec(DynamicOutputBudget, instance=True)
+    winner = mock.create_autospec(DynamicOutputBudget, instance=True)
+
+    def publish_winner() -> DynamicOutputBudget:
+        hermes._runtimes["profile-a"] = winner
+        return candidate
+
+    with mock.patch.object(
+        hermes,
+        "_runtime_key",
+        return_value="profile-a",
+    ), mock.patch.object(hermes, "build_runtime", side_effect=publish_winner):
+        assert hermes.get_runtime() is winner
+
+        hermes._runtimes.clear()
+        acquired, cleanup = hermes._acquire_profile_runtime("profile-a")
+        assert acquired is winner
+        cleanup()
+
+        hermes._active_profiles["profile-a"] = 1
+        assert hermes.get_active_runtime() is winner
+
+
+def test_active_runtime_discards_candidate_if_owner_unloads_during_build() -> None:
+    """Never resurrect a profile whose last owner leaves during construction.
+
+    A stale middleware callback may start rebuilding just before final unload.
+    Because extension construction runs without the mutex, publication must
+    recheck ownership and discard the candidate when cleanup wins; otherwise a
+    removed profile's old settings are cached for the next forced discovery.
+    """
+
+    candidate = mock.create_autospec(DynamicOutputBudget, instance=True)
+    hermes._active_profiles["profile-a"] = 1
+
+    def unload_then_finish() -> DynamicOutputBudget:
+        hermes._deactivate_profile("profile-a")
+        return candidate
+
+    with mock.patch.object(
+        hermes,
+        "_runtime_key",
+        return_value="profile-a",
+    ), mock.patch.object(hermes, "build_runtime", side_effect=unload_then_finish):
+        assert hermes.get_active_runtime() is None
+
+    assert hermes._runtimes == {}
+
+
 def _capture_registration_failure(
     callback: Any,
     context: Context,

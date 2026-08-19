@@ -35,8 +35,13 @@ def get_runtime() -> DynamicOutputBudget:
     key = _runtime_key()
     with _runtime_lock:
         runtime = _runtimes.get(key)
+    if runtime is not None:
+        return runtime
+    candidate = build_runtime()
+    with _runtime_lock:
+        runtime = _runtimes.get(key)
         if runtime is None:
-            runtime = build_runtime()
+            runtime = candidate
             _runtimes[key] = runtime
         return runtime
 
@@ -65,8 +70,12 @@ def _acquire_profile_runtime(
 
     with _runtime_lock:
         runtime = _runtimes.get(key)
+    if runtime is None:
+        candidate = build_runtime()
+    with _runtime_lock:
+        runtime = _runtimes.get(key)
         if runtime is None:
-            runtime = build_runtime()
+            runtime = candidate
             _runtimes[key] = runtime
         _active_profiles[key] = _active_profiles.get(key, 0) + 1
     return runtime, _profile_cleanup(key)
@@ -80,8 +89,15 @@ def get_active_runtime() -> Optional[DynamicOutputBudget]:
         if _active_profiles.get(key, 0) == 0:
             return None
         runtime = _runtimes.get(key)
+    if runtime is not None:
+        return runtime
+    candidate = build_runtime()
+    with _runtime_lock:
+        if _active_profiles.get(key, 0) == 0:
+            return None
+        runtime = _runtimes.get(key)
         if runtime is None:
-            runtime = build_runtime()
+            runtime = candidate
             _runtimes[key] = runtime
         return runtime
 
