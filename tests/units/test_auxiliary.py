@@ -746,3 +746,38 @@ def test_install_skips_a_missing_private_builder(
 
     assert install(lambda: None) is None
     assert "Hermes auxiliary builder API changed" in caplog.text
+
+
+def test_install_skips_an_uninspectable_private_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Keep public middleware usable when a callable lacks a signature.
+
+    A decorated or extension-backed Hermes builder can remain callable while
+    ``inspect.signature`` raises ``TypeError`` or ``ValueError``.  This private
+    compatibility hook must warn, preserve the original binding, and return
+    ``None``; propagating the inspection failure rolls back the stable public
+    middleware and disables the whole plugin.
+    """
+
+    class UninspectableBuilder:
+        @property
+        def __signature__(self) -> Any:
+            raise ValueError("opaque callable")
+
+        def __call__(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            del args, kwargs
+            return {}
+
+    agent = types.ModuleType("agent")
+    agent.__path__ = []  # type: ignore[attr-defined]
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+    original = UninspectableBuilder()
+    auxiliary._build_call_kwargs = original  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+
+    assert install(lambda: None) is None
+    assert auxiliary._build_call_kwargs is original  # type: ignore[attr-defined]
+    assert "auxiliary builder signature is unavailable" in caplog.text

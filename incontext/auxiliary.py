@@ -6,7 +6,7 @@ import logging
 import threading
 from importlib import import_module
 from inspect import Parameter, Signature, signature
-from typing import Any, Callable, Dict, Optional, Union, cast
+from typing import Any, Callable, Dict, Optional, Tuple, Union, cast
 
 from .budget import OUTPUT_BUDGET_FIELDS, DynamicOutputBudget
 from .settings import normalize_base_url
@@ -123,8 +123,30 @@ _installed_wrapper: Optional[_AuxiliaryBudget] = None
 _install_count = 0
 
 
-def install(runtime: RuntimeSource) -> Optional[Cleanup]:
-    """Apply incontext to Hermes requests that bypass ``llm_request`` middleware."""
+def _new_wrapper(
+    runtime: RuntimeSource,
+    current: Any,
+    output_cap_selector: Optional[OutputCapSelector],
+) -> Optional[_AuxiliaryBudget]:
+    """Construct an auxiliary wrapper when its callable can be inspected."""
+
+    original = (
+        current.original
+        if isinstance(current, _AuxiliaryBudget)
+        else cast(AuxiliaryBuilder, current)
+    )
+    try:
+        return _AuxiliaryBudget(runtime, original, output_cap_selector)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "incontext auxiliary budgeting unavailable: "
+            "Hermes auxiliary builder signature is unavailable"
+        )
+        return None
+
+
+def _load_auxiliary_builder() -> Optional[Tuple[Any, AuxiliaryBuilder]]:
+    """Import and validate Hermes' optional private auxiliary binding."""
 
     try:
         auxiliary_client = import_module("agent.auxiliary_client")
@@ -133,16 +155,26 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
             "incontext auxiliary budgeting unavailable: Hermes is not installed"
         )
         return None
+    current = auxiliary_client.__dict__.get("_build_call_kwargs")
+    if not callable(current):
+        LOGGER.warning(
+            "incontext auxiliary budgeting unavailable: "
+            "Hermes auxiliary builder API changed"
+        )
+        return None
+    return auxiliary_client, cast(AuxiliaryBuilder, current)
+
+
+def install(runtime: RuntimeSource) -> Optional[Cleanup]:
+    """Apply incontext to Hermes requests that bypass ``llm_request`` middleware."""
+
+    loaded = _load_auxiliary_builder()
+    if loaded is None:
+        return None
+    auxiliary_client, current = loaded
 
     global _install_count, _installed_wrapper  # noqa: PLW0603
     with _install_lock:
-        current = auxiliary_client.__dict__.get("_build_call_kwargs")
-        if not callable(current):
-            LOGGER.warning(
-                "incontext auxiliary budgeting unavailable: "
-                "Hermes auxiliary builder API changed"
-            )
-            return None
         output_cap_selector = auxiliary_client.__dict__.get(
             "auxiliary_max_tokens_param"
         )
@@ -155,12 +187,10 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
             wrapper.output_cap_selector = output_cap_selector
             _install_count += 1
         else:
-            original = (
-                current.original
-                if isinstance(current, _AuxiliaryBudget)
-                else cast(AuxiliaryBuilder, current)
-            )
-            wrapper = _AuxiliaryBudget(runtime, original, output_cap_selector)
+            created = _new_wrapper(runtime, current, output_cap_selector)
+            if created is None:
+                return None
+            wrapper = created
             auxiliary_client.__dict__["_build_call_kwargs"] = wrapper
             _installed_wrapper = wrapper
             _install_count = 1
