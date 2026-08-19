@@ -4,6 +4,7 @@ import builtins
 import sys
 import types
 from collections.abc import Mapping
+from dataclasses import FrozenInstanceError
 from typing import Any, ClassVar
 from unittest.mock import patch
 
@@ -60,7 +61,18 @@ def load(
 
 
 def test_settings_remains_slotted_on_python_38() -> None:
-    assert not hasattr(load(), "__dict__")
+    """Keep the runtime snapshot compact and immutable on every Python.
+
+    Route identity and compression limits must stay mutually consistent after
+    validation.  Retaining both slots and the frozen dataclass guard prevents a
+    later field assignment from silently changing only part of that snapshot.
+    """
+
+    loaded = load()
+
+    assert not hasattr(loaded, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        loaded.model_name = "changed-after-validation"
 
 
 @pytest.mark.parametrize(("value", "expected"), [(1, 1), (" 42 ", 42), (0, 0)])
