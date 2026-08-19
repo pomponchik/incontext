@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Set, Tuple, Type, cast
 from urllib.parse import urlsplit, urlunsplit
@@ -294,7 +295,7 @@ def _effective_compression_threshold(
 def _normalized_provider_selector(value: Any) -> str:
     """Normalize the menu spelling Hermes uses for named providers."""
 
-    return "-".join(str(value or "").strip().lower().replace("_", "-").split())
+    return "-".join(str(value or "").strip().lower().split())
 
 
 def _custom_provider_aliases(display_name: Any, provider_key: Any) -> Set[str]:
@@ -317,25 +318,38 @@ def _custom_provider_aliases(display_name: Any, provider_key: Any) -> Set[str]:
 
 
 def _provider_enabled(configured: Mapping[str, Any]) -> bool:
-    """Interpret Hermes' enabled flag for a modern provider entry."""
+    """Delegate optional enabled semantics to the installed Hermes release."""
 
-    flag = configured.get("enabled", True)
-    if isinstance(flag, bool):
-        return flag
-    if isinstance(flag, str):
-        return flag.strip().lower() not in {"false", "0", "no", "off"}
-    return bool(flag)
+    try:
+        from hermes_cli.config import (  # noqa: PLC0415
+            is_provider_enabled,
+        )
+    except (ImportError, AttributeError):
+        # Hermes releases before this helper treated ``enabled`` as unknown
+        # provider metadata and did not hide the route.
+        return True
+    try:
+        return bool(is_provider_enabled(dict(configured)))
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _modern_provider_endpoint(configured: Mapping[str, Any]) -> Any:
-    """Resolve endpoint aliases in Hermes' modern provider precedence."""
+    """Resolve aliases read by Hermes' direct modern-provider fast path."""
 
-    return (
-        configured.get("api")
-        or configured.get("url")
-        or configured.get("base_url")
-        or configured.get("baseUrl")
-    )
+    return configured.get("api") or configured.get("url") or configured.get("base_url")
+
+
+def _valid_provider_endpoint(value: Any) -> Optional[str]:
+    """Return a URL accepted by Hermes' compatibility normalizer."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    candidate = value.strip()
+    if re.search(r"\{[^}]+\}", candidate):
+        return candidate
+    parsed = urlsplit(candidate)
+    return candidate if parsed.scheme and parsed.netloc else None
 
 
 def _normalized_legacy_provider(
@@ -343,11 +357,14 @@ def _normalized_legacy_provider(
 ) -> Optional[Mapping[str, Any]]:
     """Return Hermes' canonical view of one legacy provider entry."""
 
-    endpoint = (
-        configured.get("base_url")
-        or configured.get("baseUrl")
-        or configured.get("url")
-        or configured.get("api")
+    endpoint = next(
+        (
+            candidate
+            for alias in ("base_url", "baseUrl", "url", "api")
+            if (candidate := _valid_provider_endpoint(configured.get(alias)))
+            is not None
+        ),
+        None,
     )
     if not endpoint:
         return None
@@ -383,6 +400,27 @@ def _named_provider_config(
     return None
 
 
+def _compatible_modern_provider_config(
+    providers: Mapping[str, Any],
+    selector: str,
+) -> Optional[Mapping[str, Any]]:
+    """Normalize camelCase modern entries after the legacy compatibility view."""
+
+    target = _normalized_provider_selector(selector)
+    for key, configured in providers.items():
+        if not isinstance(configured, Mapping):
+            continue
+        display_name = configured.get("name") or key
+        if target not in _custom_provider_aliases(display_name, key):
+            continue
+        if not _provider_enabled(configured):
+            continue
+        normalized = _normalized_legacy_provider(configured)
+        if normalized is not None:
+            return normalized
+    return None
+
+
 def _legacy_provider_config(
     custom_providers: Any,
     selector: str,
@@ -413,10 +451,13 @@ def _configured_provider(
     """Resolve the new mapping before Hermes' legacy provider list."""
 
     configured = _named_provider_config(providers, selector)
+    if configured is not None:
+        return configured
+    configured = _legacy_provider_config(custom_providers, selector)
     return (
         configured
         if configured is not None
-        else _legacy_provider_config(custom_providers, selector)
+        else _compatible_modern_provider_config(providers, selector)
     )
 
 
@@ -486,14 +527,27 @@ def _effective_provider_route(
     provider = provider_selector
     provider_config: Mapping[str, Any] = {}
     named = False
-    if ":" in provider_selector:
-        provider_prefix, provider_name = provider_selector.split(":", 1)
+    if provider_selector.startswith("custom:"):
+        provider_name = provider_selector.split(":", 1)[1]
         configured_provider = _configured_provider(
             providers,
             custom_providers,
             provider_name,
         )
-        if not provider_prefix or not provider_name or configured_provider is None:
+        if not provider_name or configured_provider is None:
+            raise SettingsError(
+                "Hermes named model.provider must reference providers.<name>",
+            )
+        provider = "custom"
+        provider_config = configured_provider
+        named = True
+    elif ":" in provider_selector:
+        configured_provider = _configured_provider(
+            providers,
+            custom_providers,
+            provider_selector,
+        )
+        if configured_provider is None:
             raise SettingsError(
                 "Hermes named model.provider must reference providers.<name>",
             )
@@ -507,13 +561,15 @@ def _effective_provider_route(
             custom_providers,
         )
     else:
-        configured_provider = providers.get(provider)
-        if configured_provider is None and provider == "custom":
-            configured_provider = _legacy_provider_config(
+        if provider == "custom" and not model.get("base_url"):
+            configured_provider = _configured_provider(
+                providers,
                 custom_providers,
                 provider,
             )
             named = configured_provider is not None
+        else:
+            configured_provider = providers.get(provider)
         if configured_provider is not None:
             if not isinstance(configured_provider, Mapping):
                 raise SettingsError("Hermes providers entry must be a mapping")
@@ -561,6 +617,38 @@ def _validate_context_engine(
             "Hermes context.engine must be compressor unless an explicit "
             "compression_window_tokens override is configured",
         )
+
+
+def _resolve_compression_window(
+    *,
+    compressor_class: Type[Any],
+    compressor_options: Dict[str, Any],
+    compression_enabled: bool,
+    context_length: int,
+    window_override: int,
+) -> int:
+    """Resolve the active automatic boundary without duplicating policy."""
+
+    if window_override != 0:
+        return window_override
+    if not compression_enabled:
+        return context_length
+    compressor = _construct_compressor(compressor_class, compressor_options)
+    resolved_context = _strict_int(
+        getattr(compressor, "context_length", None),
+        "Hermes ContextCompressor.context_length",
+        minimum=1,
+    )
+    if resolved_context != context_length:
+        raise SettingsError(
+            "Hermes ContextCompressor context length does not match "
+            f"model.context_length: {resolved_context} != {context_length}",
+        )
+    return _strict_int(
+        getattr(compressor, "threshold_tokens", None),
+        "Hermes ContextCompressor.threshold_tokens",
+        minimum=1,
+    )
 
 
 def load_settings(
@@ -627,41 +715,31 @@ def load_settings(
 
     window_override = environment.compression_window_tokens
     _validate_context_engine(context, window_override)
-    if window_override == 0:
-        compressor = _construct_compressor(
-            compressor_class,
-            {
-                "model": model_name,
-                "threshold_percent": threshold,
-                "quiet_mode": True,
-                "base_url": base_url,
-                "config_context_length": context_length,
-                "provider": provider,
-                "api_mode": str(model.get("api_mode") or ""),
-                "max_tokens": max_tokens,
-                "model_thresholds": _normalized_model_thresholds(
-                    compression.get("model_thresholds"),
-                ),
-                "threshold_tokens_cap": compression.get("threshold_tokens"),
-            },
-        )
-        resolved_context = _strict_int(
-            getattr(compressor, "context_length", None),
-            "Hermes ContextCompressor.context_length",
-            minimum=1,
-        )
-        if resolved_context != context_length:
-            raise SettingsError(
-                "Hermes ContextCompressor context length does not match "
-                f"model.context_length: {resolved_context} != {context_length}",
-            )
-        compression_window = _strict_int(
-            getattr(compressor, "threshold_tokens", None),
-            "Hermes ContextCompressor.threshold_tokens",
-            minimum=1,
-        )
-    else:
-        compression_window = window_override
+    compression_enabled = str(compression.get("enabled", True)).lower() in {
+        "true",
+        "1",
+        "yes",
+    }
+    compression_window = _resolve_compression_window(
+        compressor_class=compressor_class,
+        compressor_options={
+            "model": model_name,
+            "threshold_percent": threshold,
+            "quiet_mode": True,
+            "base_url": base_url,
+            "config_context_length": context_length,
+            "provider": provider,
+            "api_mode": str(model.get("api_mode") or ""),
+            "max_tokens": max_tokens,
+            "model_thresholds": _normalized_model_thresholds(
+                compression.get("model_thresholds"),
+            ),
+            "threshold_tokens_cap": compression.get("threshold_tokens"),
+        },
+        compression_enabled=compression_enabled,
+        context_length=context_length,
+        window_override=window_override,
+    )
 
     if compression_window > context_length:
         raise SettingsError(

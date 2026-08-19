@@ -388,7 +388,7 @@ def test_load_settings_matches_all_hermes_named_provider_selectors(
     assert result.base_url == "https://inference.example/v1"
 
 
-@pytest.mark.parametrize("selector", ["custom:local-vllm", "custom:edge-key"])
+@pytest.mark.parametrize("selector", ["custom:local-vllm", "custom:edge_key"])
 def test_load_settings_resolves_legacy_custom_provider_route(selector: str) -> None:
     """Honor the list-style custom-provider route still resolved by Hermes.
 
@@ -476,6 +476,7 @@ def test_prefixed_custom_identity_resolves_in_both_provider_schemas(
 
 @pytest.mark.parametrize("disabled", [False, "off", 0])
 def test_disabled_modern_provider_falls_through_to_legacy_entry(
+    monkeypatch: pytest.MonkeyPatch,
     disabled: Any,
 ) -> None:
     """Follow Hermes when a modern provider entry is explicitly disabled.
@@ -486,6 +487,20 @@ def test_disabled_modern_provider_falls_through_to_legacy_entry(
     silently disables exact budgeting on the valid legacy route.  Boolean,
     string, and truth-value forms must follow Hermes' compatibility parser.
     """
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []  # type: ignore[attr-defined]
+    config_module = types.ModuleType("hermes_cli.config")
+
+    def is_provider_enabled(configured: dict[str, Any]) -> bool:
+        flag = configured.get("enabled", True)
+        if isinstance(flag, str):
+            return flag.strip().lower() not in {"false", "0", "no", "off"}
+        return bool(flag)
+
+    config_module.is_provider_enabled = is_provider_enabled  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config_module)
 
     result = load(
         config={
@@ -511,6 +526,72 @@ def test_disabled_modern_provider_falls_through_to_legacy_entry(
     )
 
     assert result.base_url == "https://live.example/v1"
+
+
+def test_older_hermes_does_not_apply_a_future_provider_enabled_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follow the installed Hermes version instead of cloning newer policy.
+
+    Releases predating ``hermes_cli.config.is_provider_enabled`` treat an
+    ``enabled`` key as inert provider metadata and still route through that
+    entry.  Locally reimplementing a newer truthiness rule would make
+    incontext scope itself to a legacy fallback while the installed agent uses
+    the modern endpoint, silently disabling budgeting on the live request.
+    """
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.delitem(sys.modules, "hermes_cli.config", raising=False)
+
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": "custom:edge",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            "providers": {
+                "edge": {
+                    "enabled": False,
+                    "api": "https://version-active.example/v1",
+                },
+            },
+            "custom_providers": [
+                {"name": "Edge", "base_url": "https://legacy.example/v1"},
+            ],
+        },
+    )
+
+    assert result.base_url == "https://version-active.example/v1"
+
+
+def test_provider_enabled_fails_open_when_installed_helper_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep route discovery usable across a broken private Hermes helper.
+
+    The version-owned enabled parser is optional integration code.  If an
+    additive Hermes change makes it reject the copied mapping, incontext must
+    retain the provider as older releases did rather than silently switching
+    to another endpoint before the agent itself resolves the route.
+    """
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []  # type: ignore[attr-defined]
+    config_module = types.ModuleType("hermes_cli.config")
+
+    def fail(configured: dict[str, Any]) -> bool:
+        del configured
+        raise RuntimeError("private helper changed")
+
+    config_module.is_provider_enabled = fail  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config_module)
+
+    assert settings._provider_enabled({"enabled": False}) is True
 
 
 def test_legacy_custom_provider_lookup_returns_none_without_a_match() -> None:
@@ -604,6 +685,105 @@ def test_named_provider_uses_hermes_camelcase_base_url_alias() -> None:
     assert result.base_url == "https://inference.example/v1"
 
 
+def test_legacy_entry_precedes_compatibility_normalized_modern_base_url() -> None:
+    """Mirror Hermes' two-stage lookup for camelCase-only modern entries.
+
+    The direct modern fast path does not read ``baseUrl``.  Hermes next builds
+    its compatibility list with persisted legacy entries first, so a matching
+    legacy route wins before the modern record is camelCase-normalized.  Taking
+    modern ``baseUrl`` immediately gives incontext a different endpoint guard
+    from the agent that will send the request.
+    """
+
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": "custom:edge",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            "providers": {
+                "edge": {"baseUrl": "https://modern.example/v1"},
+            },
+            "custom_providers": [
+                {"name": "Edge", "base_url": "https://legacy.example/v1"},
+            ],
+        },
+    )
+
+    assert result.base_url == "https://legacy.example/v1"
+
+
+@pytest.mark.parametrize(
+    "providers",
+    [
+        {"edge": "not-a-mapping"},
+        {"unrelated": {"baseUrl": "https://unrelated.example/v1"}},
+        {"edge": {"baseUrl": "not-a-url"}},
+    ],
+)
+def test_compatibility_provider_lookup_ignores_unusable_entries(
+    providers: Mapping[str, Any],
+) -> None:
+    """Return no route for entries Hermes' compatibility view cannot expose.
+
+    CamelCase normalization is a fallback after direct and legacy lookup, not
+    permission to accept malformed mappings, unrelated identities, or invalid
+    URLs.  Treating any of those as selected would remove or corrupt endpoint
+    isolation for the tokenizer-backed budget.
+    """
+
+    assert settings._compatible_modern_provider_config(providers, "edge") is None
+
+
+def test_compatibility_provider_lookup_skips_version_disabled_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apply installed Hermes enabled policy in the compatibility fallback.
+
+    A camelCase-only endpoint bypasses the direct provider fast path and is
+    normalized later.  When the installed release supports disabling entries,
+    that later path must skip it too or incontext revives a route Hermes hides.
+    """
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []  # type: ignore[attr-defined]
+    config_module = types.ModuleType("hermes_cli.config")
+    config_module.is_provider_enabled = (  # type: ignore[attr-defined]
+        lambda configured: bool(configured.get("enabled", True))
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config_module)
+
+    assert (
+        settings._compatible_modern_provider_config(
+            {
+                "edge": {
+                    "enabled": False,
+                    "baseUrl": "https://disabled.example/v1",
+                },
+            },
+            "edge",
+        )
+        is None
+    )
+
+
+def test_legacy_provider_accepts_runtime_url_placeholder() -> None:
+    """Preserve URL templates that Hermes expands after configuration load.
+
+    Hermes deliberately accepts both environment references and bare-brace URL
+    templates before runtime substitution.  Rejecting them locally would hide
+    a valid provider from incontext and make plugin startup disagree with the
+    agent's later resolved route.
+    """
+
+    assert settings._valid_provider_endpoint("https://${REGION}.example/v1") == (
+        "https://${REGION}.example/v1"
+    )
+
+
 @pytest.mark.parametrize(
     ("provider_entry", "expected"),
     [
@@ -684,6 +864,117 @@ def test_incomplete_provider_entries_fall_through_to_usable_legacy_entry() -> No
     assert result.base_url == "https://live.example/v1"
 
 
+def test_bare_custom_incomplete_modern_entry_falls_through_to_legacy() -> None:
+    """Resolve a usable legacy route for Hermes' literal custom identity.
+
+    A bare ``provider: custom`` can name an entry literally called ``custom``.
+    Hermes skips a same-key modern record without an endpoint and continues to
+    the compatibility list.  Stopping at the incomplete mapping removes the
+    URL scope and can apply the primary tokenizer to another custom route.
+    """
+
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": "custom",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            "providers": {"custom": {"name": "custom"}},
+            "custom_providers": [
+                {"name": "custom", "base_url": "https://legacy.example/v1"},
+            ],
+        },
+    )
+
+    assert result.base_url == "https://legacy.example/v1"
+
+
+def test_provider_selector_preserves_underscores_as_identity() -> None:
+    """Keep distinct Hermes provider keys distinct during route resolution.
+
+    Hermes lowercases names and replaces spaces with hyphens, but it never
+    rewrites underscores.  Collapsing ``edge_key`` into ``edge-key`` can select
+    the first colliding provider and store an endpoint that the live agent does
+    not use, causing every exact-budget route guard to miss.
+    """
+
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": "custom:edge_key",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            "providers": {
+                "edge-key": {"api": "https://hyphen.example/v1"},
+                "edge_key": {"api": "https://underscore.example/v1"},
+            },
+        },
+    )
+
+    assert result.base_url == "https://underscore.example/v1"
+
+
+def test_colon_bearing_provider_selector_matches_its_literal_key() -> None:
+    """Do not treat every colon as the reserved ``custom:`` menu prefix.
+
+    Hermes permits a modern mapping key such as ``tenant:edge`` and compares
+    that complete identity against provider aliases.  Blindly discarding the
+    prefix resolves the unrelated ``edge`` entry instead, attaching the wrong
+    endpoint and context policy to otherwise valid requests.
+    """
+
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": "tenant:edge",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            "providers": {
+                "edge": {"api": "https://suffix.example/v1"},
+                "tenant:edge": {"api": "https://literal.example/v1"},
+            },
+        },
+    )
+
+    assert result.base_url == "https://literal.example/v1"
+
+
+def test_legacy_provider_skips_malformed_higher_precedence_url() -> None:
+    """Select the first valid legacy URL rather than the first truthy value.
+
+    Hermes validates each alias in precedence order and continues after a
+    malformed ``base_url`` to a usable ``url``.  Accepting the malformed value
+    as route identity makes incontext reject the valid endpoint actually used
+    by generation and silently disables exact budgeting.
+    """
+
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": "custom:edge",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            "custom_providers": [
+                {
+                    "name": "Edge",
+                    "base_url": "not-a-url",
+                    "url": "https://live.example/v1",
+                },
+            ],
+        },
+    )
+
+    assert result.base_url == "https://live.example/v1"
+
+
 @pytest.mark.parametrize("alias", ["vllm", "ollama", "llamacpp"])
 def test_load_settings_uses_live_identity_for_local_provider_alias(alias: str) -> None:
     """Canonicalize Hermes local-provider aliases before route scoping.
@@ -724,6 +1015,10 @@ def test_load_settings_uses_live_identity_for_local_provider_alias(alias: str) -
             **base_config,
             "model": {**base_config["model"], "provider": "custom:local"},
             "providers": {"local": "invalid"},
+        },
+        {
+            **base_config,
+            "model": {**base_config["model"], "provider": "tenant:missing"},
         },
     ],
 )
@@ -1359,6 +1654,34 @@ def test_load_settings_explicit_window_avoids_compressor_construction() -> None:
         compressor=MustNotRun,
     )
     assert result.compression_window == 50_000
+
+
+@pytest.mark.parametrize("disabled", [False, "false", "0", "no"])
+def test_disabled_hermes_compression_uses_the_complete_context_window(
+    disabled: Any,
+) -> None:
+    """Do not enforce a threshold whose automatic compaction is disabled.
+
+    Hermes still constructs a ContextCompressor for metadata when
+    ``compression.enabled`` is false, but it never runs automatic preflight or
+    reactive compaction at that object's threshold.  Reusing the inactive
+    threshold would make incontext prematurely refuse valid requests even
+    though Hermes intentionally allows them up to the model context limit.
+    """
+
+    class MustNotRun:
+        def __init__(self, **kwargs: Any) -> None:
+            raise AssertionError("inactive compressor threshold must not be used")
+
+    result = load(
+        config={
+            **base_config,
+            "compression": {"enabled": disabled, "threshold": 0.5},
+        },
+        compressor=MustNotRun,
+    )
+
+    assert result.compression_window == base_config["model"]["context_length"]
 
 
 def test_load_settings_rejects_non_builtin_context_engine() -> None:
