@@ -306,32 +306,33 @@ def test_live_route_reader_marks_a_broken_private_api_as_unmatched(
 
 
 @pytest.mark.parametrize(
-    "live_route",
+    ("provider", "base_url", "expected"),
     [
-        {
-            "provider": "openai",
-            "model": "qwen-test",
-            "base_url": "https://primary.invalid/v1",
-        },
-        {
-            "provider": "custom",
-            "model": "qwen-test",
-            "base_url": "https://fallback.invalid/v1",
-        },
+        ("openai", "https://primary.invalid/v1", False),
+        ("custom", "https://fallback.invalid/v1", False),
+        (" Custom ", "https://PRIMARY.INVALID:443/v1/", True),
     ],
 )
 def test_preflight_route_guard_checks_provider_and_endpoint(
     monkeypatch: pytest.MonkeyPatch,
-    live_route: dict[str, str],
+    provider: str,
+    base_url: str,
+    expected: bool,
 ) -> None:
-    """Reject same-model switches that change either remaining route identity.
+    """Accept only the configured route after harmless normalization.
 
     A fallback can expose the same model alias through another provider or URL.
     Model equality alone does not prove tokenizer/template compatibility, so
-    exact preflight must require all configured route dimensions to match.
+    exact preflight must require all configured route dimensions to match.  DNS
+    case, a default HTTPS port, and a trailing slash remain the same endpoint.
     """
 
     auxiliary = types.ModuleType("agent.auxiliary_client")
+    live_route = {
+        "provider": provider,
+        "model": "qwen-test",
+        "base_url": base_url,
+    }
     auxiliary._runtime_main_value = live_route.get  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
     scoped = DynamicOutputBudget(
@@ -346,7 +347,7 @@ def test_preflight_route_guard_checks_provider_and_endpoint(
         Counter(1),
     )
 
-    assert preflight._matches_live_route(scoped) is False
+    assert preflight._matches_live_route(scoped) is expected
 
 
 def test_exact_gate_resolves_profile_runtime_at_call_time() -> None:
@@ -506,6 +507,12 @@ def test_install_is_idempotent_and_retains_the_initial_fallback(
     assert turn_context.estimate_request_tokens_rough([]) == 200
     assert first.requests == []
     assert second.requests == [{"model": "qwen-test", "messages": []}]
+
+    second_cleanup()
+    assert turn_context.estimate_request_tokens_rough([]) == 100
+    assert first.requests == [{"model": "qwen-test", "messages": []}]
+    assert second.requests == [{"model": "qwen-test", "messages": []}]
+    first_cleanup()
 
 
 def test_cleanup_restores_all_preflight_bindings_after_final_owner(
