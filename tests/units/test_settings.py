@@ -388,6 +388,36 @@ def test_load_settings_matches_all_hermes_named_provider_selectors(
     assert result.base_url == "https://inference.example/v1"
 
 
+def test_named_provider_identity_preserves_repeated_spaces() -> None:
+    """Preserve repeated spaces in provider identities exactly like Hermes.
+
+    Hermes converts every literal space in a display name to one hyphen, so
+    ``Edge  Name`` has the durable selector ``custom:edge--name``.  Collapsing
+    whitespace first changes that identity to ``edge-name`` and makes
+    incontext reject a provider that the installed runtime resolves.
+    """
+
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": "custom:edge--name",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            "providers": {
+                "key": {
+                    "name": "Edge  Name",
+                    "api": "https://inference.example/v1",
+                },
+            },
+        },
+    )
+
+    assert result.provider == "custom"
+    assert result.base_url == "https://inference.example/v1"
+
+
 @pytest.mark.parametrize("selector", ["custom:local-vllm", "custom:edge_key"])
 def test_load_settings_resolves_legacy_custom_provider_route(selector: str) -> None:
     """Honor the list-style custom-provider route still resolved by Hermes.
@@ -864,6 +894,42 @@ def test_incomplete_provider_entries_fall_through_to_usable_legacy_entry() -> No
     assert result.base_url == "https://live.example/v1"
 
 
+@pytest.mark.parametrize(
+    "providers",
+    [
+        {"edge": "invalid"},
+        "invalid-container",
+    ],
+)
+def test_malformed_modern_provider_data_falls_through_to_legacy(
+    providers: Any,
+) -> None:
+    """Skip malformed modern data before trying Hermes' legacy fallback.
+
+    Both supported Hermes releases ignore a non-mapping provider record or
+    container and can still resolve the same identity from
+    ``custom_providers``.  Failing immediately aborts plugin registration even
+    though the agent has already selected a valid backward-compatible route.
+    """
+
+    result = load(
+        config={
+            "model": {
+                "default": "qwen-test",
+                "provider": "custom:edge",
+                "context_length": 65_536,
+            },
+            "compression": {"threshold": 0.5},
+            "providers": providers,
+            "custom_providers": [
+                {"name": "Edge", "base_url": "https://legacy.example/v1"},
+            ],
+        },
+    )
+
+    assert result.base_url == "https://legacy.example/v1"
+
+
 def test_bare_custom_incomplete_modern_entry_falls_through_to_legacy() -> None:
     """Resolve a usable legacy route for Hermes' literal custom identity.
 
@@ -1009,10 +1075,6 @@ def test_load_settings_uses_live_identity_for_local_provider_alias(alias: str) -
         },
         {
             **base_config,
-            "providers": {"custom": "invalid"},
-        },
-        {
-            **base_config,
             "model": {**base_config["model"], "provider": "custom:local"},
             "providers": {"local": "invalid"},
         },
@@ -1054,6 +1116,49 @@ def test_load_settings_preserves_nonlocal_builtin_provider() -> None:
 
     assert result.provider == "openai"
     assert result.base_url == "https://inference.example/v1"
+
+
+def test_auto_provider_with_local_endpoint_uses_live_openrouter_identity() -> None:
+    """Scope an auto-selected explicit local endpoint to Hermes' live route.
+
+    Hermes special-cases ``provider: auto`` with a non-cloud ``base_url`` so
+    ambient cloud credentials cannot shadow the configured local server.  Its
+    OpenAI-compatible resolver exposes provider ``openrouter`` in middleware,
+    not the literal selector ``auto``; retaining ``auto`` makes route guards
+    reject every otherwise matching primary request.
+    """
+
+    result = load(
+        config={
+            **base_config,
+            "model": {
+                **base_config["model"],
+                "provider": "auto",
+                "base_url": "http://inference.local:8000/v1",
+            },
+        },
+    )
+
+    assert result.provider == "openrouter"
+    assert result.base_url == "http://inference.local:8000/v1"
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("", False),
+        ("https://openai.com/v1", False),
+        ("https://api.anthropic.com/v1", False),
+        ("http://localhost:8000/v1", True),
+    ],
+)
+def test_auto_local_route_excludes_known_cloud_hosts(
+    base_url: str,
+    expected: bool,
+) -> None:
+    """Apply Hermes' auto bypass only to explicit non-cloud endpoints."""
+
+    assert settings._auto_uses_openai_compatible_route(base_url) is expected
 
 
 def test_load_settings_uses_hermes_live_identity_for_builtin_alias(
@@ -1836,12 +1941,27 @@ def test_load_settings_rejects_non_mapping_config() -> None:
         load(config=[])
 
 
-@pytest.mark.parametrize("section", ["model", "compression", "context", "providers"])
+@pytest.mark.parametrize("section", ["model", "compression", "context"])
 def test_load_settings_rejects_non_mapping_sections(section: str) -> None:
     config = dict(base_config)
     config[section] = []
     with pytest.raises(settings.SettingsError, match=section):
         load(config=config)
+
+
+def test_load_settings_ignores_non_mapping_providers_for_direct_route() -> None:
+    """Keep an explicit model endpoint usable when providers metadata is bad.
+
+    Hermes treats a malformed optional ``providers`` container as empty and
+    continues through the direct model route.  Incontext must not reject the
+    whole otherwise valid profile before it can scope budgeting to the model's
+    explicit custom URL.
+    """
+
+    result = load(config={**base_config, "providers": "invalid"})
+
+    assert result.provider == "custom"
+    assert result.base_url == "https://inference.example/v1"
 
 
 @pytest.mark.parametrize("model_name", [None, "", "   ", 123])

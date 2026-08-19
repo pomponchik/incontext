@@ -295,7 +295,7 @@ def _effective_compression_threshold(
 def _normalized_provider_selector(value: Any) -> str:
     """Normalize the menu spelling Hermes uses for named providers."""
 
-    return "-".join(str(value or "").strip().lower().split())
+    return str(value or "").strip().lower().replace(" ", "-")
 
 
 def _custom_provider_aliases(display_name: Any, provider_key: Any) -> Set[str]:
@@ -383,15 +383,11 @@ def _named_provider_config(
 
     target = _normalized_provider_selector(selector)
     for key, configured in providers.items():
-        display_name = (
-            configured.get("name")
-            if isinstance(configured, Mapping) and configured.get("name")
-            else key
-        )
+        if not isinstance(configured, Mapping):
+            continue
+        display_name = configured.get("name") or key
         if target not in _custom_provider_aliases(display_name, key):
             continue
-        if not isinstance(configured, Mapping):
-            raise SettingsError("Hermes providers entry must be a mapping")
         if not _provider_enabled(configured):
             continue
         if not _modern_provider_endpoint(configured):
@@ -527,7 +523,11 @@ def _effective_provider_route(
     provider = provider_selector
     provider_config: Mapping[str, Any] = {}
     named = False
-    if provider_selector.startswith("custom:"):
+    if provider_selector == "auto" and _auto_uses_openai_compatible_route(
+        model.get("base_url"),
+    ):
+        provider = "openrouter"
+    elif provider_selector.startswith("custom:"):
         provider_name = provider_selector.split(":", 1)[1]
         configured_provider = _configured_provider(
             providers,
@@ -570,15 +570,29 @@ def _effective_provider_route(
             named = configured_provider is not None
         else:
             configured_provider = providers.get(provider)
-        if configured_provider is not None:
-            if not isinstance(configured_provider, Mapping):
-                raise SettingsError("Hermes providers entry must be a mapping")
+        if configured_provider is not None and isinstance(
+            configured_provider,
+            Mapping,
+        ):
             provider_config = configured_provider
     provider_endpoint = _modern_provider_endpoint(provider_config)
     base_url = normalize_base_url(
         provider_endpoint if named else model.get("base_url") or provider_endpoint,
     )
     return provider, base_url, provider_config
+
+
+def _auto_uses_openai_compatible_route(base_url: Any) -> bool:
+    """Mirror Hermes' explicit-local-endpoint bypass for provider auto."""
+
+    value = str(base_url or "").strip()
+    if not value:
+        return False
+    hostname = (urlsplit(value).hostname or "").lower()
+    cloud_hosts = ("openrouter.ai", "anthropic.com", "openai.com")
+    return not any(
+        hostname == cloud or hostname.endswith(f".{cloud}") for cloud in cloud_hosts
+    )
 
 
 def _effective_max_tokens(
@@ -677,7 +691,10 @@ def load_settings(
     model = _section(raw_config, "model")
     compression = _section(raw_config, "compression")
     context = _section(raw_config, "context")
-    providers = _section(raw_config, "providers")
+    configured_providers = raw_config.get("providers", {})
+    providers = (
+        configured_providers if isinstance(configured_providers, Mapping) else {}
+    )
     configured_model_name = model.get("default")
     if not isinstance(configured_model_name, str) or not configured_model_name.strip():
         raise SettingsError("Hermes model.default must be a non-empty string")
