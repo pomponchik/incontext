@@ -49,6 +49,7 @@ class Counter(Backend):
     [
         (64_000, 1_000, 0, 63_000),
         (64_000, 1_000, 1024, 61_976),
+        (64_000, 0, 0, 64_000),
         (64_000, 64_000, 0, None),
         (64_000, 70_000, 0, None),
     ],
@@ -66,7 +67,7 @@ def test_compute_max_tokens_boundaries(
     ("window", "prompt", "margin", "message"),
     [
         (0, 1, 0, "compression_window"),
-        (1, 0, 0, "prompt_tokens"),
+        (1, -1, 0, "prompt_tokens"),
         (1, 1, -1, "safety_margin"),
     ],
 )
@@ -82,7 +83,7 @@ def test_compute_max_tokens_rejects_invalid_inputs(
 
 @given(
     window=st.integers(min_value=1, max_value=1_000_000),
-    prompt=st.integers(min_value=1, max_value=2_000_000),
+    prompt=st.integers(min_value=0, max_value=2_000_000),
     margin=st.integers(min_value=0, max_value=100_000),
 )
 def test_compute_max_tokens_invariants(window: int, prompt: int, margin: int) -> None:
@@ -215,6 +216,108 @@ def test_runtime_uses_all_free_space_without_an_existing_output_cap(
     result = runtime(request={"model": "qwen", "messages": []})
     assert result is not None
     assert result["request"]["max_tokens"] == 45_705
+
+
+def test_runtime_accepts_an_exact_zero_token_truncated_prompt(
+    runtime_settings: Settings,
+) -> None:
+    """Allocate the complete compression window after provider truncation.
+
+    vLLM accepts ``truncate_prompt_tokens=0`` and consequently sends no prompt
+    token IDs to generation.  Its exact backend legitimately returns zero in
+    that case; treating zero as an invalid estimate crashes middleware before
+    it can preserve the provider's full safe output allowance.
+    """
+
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(0))
+
+    result = runtime(request={"model": "qwen", "messages": []})
+
+    assert result is not None
+    assert result["request"]["max_tokens"] == runtime_settings.compression_window
+
+
+def test_runtime_applies_an_additional_provider_output_limit() -> None:
+    """Never emit a dynamic cap rejected by a coupled provider schema.
+
+    Some inference engines validate prompt truncation against the final output
+    allowance, independently of the counted prompt.  The generic compression
+    remainder can then be numerically safe yet invalid on the wire.  A backend
+    limit must lower that remainder without increasing a caller cap or leaking
+    provider-specific arithmetic into the middleware.
+    """
+
+    class LimitedCounter(Counter):
+        def output_budget_limit(
+            self,
+            request: dict[str, Any],
+            *,
+            context_length: int,
+        ) -> int:
+            assert request["truncate_prompt_tokens"] == 90
+            assert context_length == 100
+            return 10
+
+    runtime = budget.DynamicOutputBudget(
+        Settings(
+            model_name="qwen",
+            context_length=100,
+            compression_window=100,
+            fallback_margin_tokens=1,
+            provider="",
+            base_url="",
+        ),
+        LimitedCounter(10),
+    )
+
+    result = runtime(
+        request={
+            "model": "qwen",
+            "messages": [],
+            "truncate_prompt_tokens": 90,
+        },
+    )
+
+    assert result is not None
+    assert result["request"]["max_tokens"] == 10
+
+
+def test_runtime_fails_open_when_provider_output_space_is_exhausted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Avoid inserting a zero-token completion rejected by the provider.
+
+    A provider constraint can consume the entire model window even while the
+    ordinary compression remainder is positive.  Returning the original
+    request lets Hermes/provider error handling decide how to recover; writing
+    a zero or negative cap would manufacture an invalid request in middleware.
+    """
+
+    class ExhaustedCounter(Counter):
+        def output_budget_limit(
+            self,
+            request: dict[str, Any],
+            *,
+            context_length: int,
+        ) -> int:
+            del request, context_length
+            return 0
+
+    runtime = budget.DynamicOutputBudget(
+        Settings(
+            model_name="qwen",
+            context_length=100,
+            compression_window=100,
+            fallback_margin_tokens=1,
+            provider="",
+            base_url="",
+        ),
+        ExhaustedCounter(10),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert runtime(request={"model": "qwen", "messages": []}) is None
+    assert "action=requires_compression" in caplog.text
 
 
 @pytest.mark.parametrize(

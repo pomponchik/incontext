@@ -719,6 +719,34 @@ def test_count_honors_prompt_truncation_values_coerced_by_vllm(
     )
 
 
+@pytest.mark.parametrize(("wire_value", "expected"), [(0, 0), ("0", 0), (False, 0)])
+def test_count_honors_zero_prompt_truncation(
+    wire_value: Any,
+    expected: int,
+) -> None:
+    """Mirror vLLM's valid empty prompt after non-strict coercion.
+
+    ChatCompletionRequest accepts integer zero, its string form, and boolean
+    false as a zero-token truncation bound.  Returning the raw tokenizer count
+    for those values invents prompt tokens generation discards and can trigger
+    unnecessary compression instead of exposing the full output window.
+    """
+
+    backend, _ = make_backend([response(120)])
+
+    assert (
+        backend.count(
+            {
+                "model": "qwen",
+                "messages": [],
+                "truncate_prompt_tokens": wire_value,
+            },
+            context_length=65_536,
+        )
+        == expected
+    )
+
+
 @pytest.mark.parametrize(
     "wire_value",
     [1.5, float("nan"), "invalid", "\u0661", object()],
@@ -778,6 +806,116 @@ def test_count_does_not_cap_multimodal_prompt_after_media_expansion() -> None:
     }
 
     assert backend.count(request, context_length=65_536) == 120
+
+
+def test_count_detects_tuple_multimodal_content_materialized_by_openai() -> None:
+    """Keep the expanded count for reusable non-list content sequences.
+
+    The OpenAI Python client accepts an iterable of content parts and converts
+    a tuple to a JSON array before vLLM renders it.  Looking only for Python
+    lists misclassifies the image as text-only and clamps the expanded prompt
+    to the textual truncation limit, which over-allocates completion tokens.
+    """
+
+    backend, _ = make_backend([response(120)])
+    request = {
+        "model": "qwen",
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    {"type": "text", "text": "describe"},
+                    {"type": "image_url", "image_url": {"url": "data:"}},
+                ),
+            },
+        ],
+        "truncate_prompt_tokens": 50,
+    }
+
+    assert backend.count(request, context_length=65_536) == 120
+
+
+def test_payload_materializes_reusable_tool_collections() -> None:
+    """Tokenize every tool that the OpenAI client serializes on the wire.
+
+    OpenAI accepts reusable iterables and materializes ``dict_values`` into a
+    JSON array.  Dropping that collection from ``/tokenize`` undercounts tool
+    schemas even though generation receives them, allowing an unsafe output
+    budget whenever those schemas cross the compression boundary.
+    """
+
+    tools_by_name = {
+        "first": {"type": "function", "function": {"name": "first"}},
+        "second": {"type": "function", "function": {"name": "second"}},
+    }
+
+    payload = VllmBackend._build_payload(
+        {
+            "model": "qwen",
+            "messages": [],
+            "tools": tools_by_name.values(),
+        },
+    )
+
+    assert payload["tools"] == list(tools_by_name.values())
+
+
+@pytest.mark.parametrize(
+    ("wire_value", "expected"),
+    [(90, 10), ("90", 10), (0, 100), (-1, None), ("invalid", None)],
+)
+def test_output_budget_limit_matches_vllm_truncation_validation(
+    wire_value: Any,
+    expected: int | None,
+) -> None:
+    """Couple completion length to vLLM's explicit input truncation cap.
+
+    vLLM rejects a chat request unless ``truncate_prompt_tokens`` is at most
+    ``context_length - max_tokens``.  A short actual prompt does not relax that
+    schema invariant, so the backend must expose ``C - T`` as an independent
+    ceiling while leaving the dynamic ``-1`` sentinel and invalid values to
+    provider validation.
+    """
+
+    backend, _ = make_backend()
+
+    assert (
+        backend.output_budget_limit(
+            {
+                "model": "qwen",
+                "messages": [],
+                "truncate_prompt_tokens": wire_value,
+            },
+            context_length=100,
+        )
+        == expected
+    )
+
+
+def test_multimodal_truncation_still_limits_vllm_output_budget() -> None:
+    """Separate expanded prompt counting from vLLM's request validation.
+
+    Media expansion prevents the textual truncation value from capping the
+    final prompt count, but vLLM still validates that same wire value against
+    ``context_length - max_tokens`` before rendering media.  Exact counting
+    must therefore keep the expanded tokenizer result while the independent
+    output ceiling remains active.
+    """
+
+    backend, _ = make_backend()
+    request = {
+        "model": "qwen",
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": "data:"}}],
+            },
+        ],
+        "truncate_prompt_tokens": 90,
+    }
+
+    assert VllmBackend._prompt_truncation_limit(request) is None
+    assert backend.output_budget_limit(request, context_length=100) == 10
 
 
 @pytest.mark.parametrize(

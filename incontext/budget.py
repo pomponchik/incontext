@@ -27,8 +27,8 @@ def compute_max_tokens(
 
     if compression_window <= 0:
         raise ValueError("compression_window must be positive")
-    if prompt_tokens <= 0:
-        raise ValueError("prompt_tokens must be positive")
+    if prompt_tokens < 0:
+        raise ValueError("prompt_tokens must not be negative")
     if safety_margin < 0:
         raise ValueError("safety_margin must not be negative")
     remaining = compression_window - prompt_tokens - safety_margin
@@ -154,12 +154,13 @@ class DynamicOutputBudget:
                 )
                 return None
 
-        dynamic_max_tokens = compute_max_tokens(
+        resolved_budget = self._resolve_output_budget(
+            request,
             self.settings.compression_window,
             prompt_tokens,
-            safety_margin=safety_margin,
+            safety_margin,
         )
-        if dynamic_max_tokens is None:
+        if resolved_budget is None:
             # The exact preflight installed during plugin registration sees
             # this condition before Hermes builds the provider request and
             # starts compression.  Keep this middleware fail-open as a second
@@ -175,14 +176,7 @@ class DynamicOutputBudget:
                 self.settings.compression_window,
             )
             return None
-        requested_output_cap = _requested_output_cap(
-            request,
-            self.backend.coerce_output_budget,
-        )
-        output_field = "max_tokens"
-        if requested_output_cap is not None:
-            output_field, requested_cap = requested_output_cap
-            dynamic_max_tokens = min(dynamic_max_tokens, requested_cap)
+        output_field, dynamic_max_tokens = resolved_budget
         output_field = self.backend.output_budget_field(output_field)
         rewritten = dict(request)
         for key in OUTPUT_BUDGET_FIELDS:
@@ -212,6 +206,38 @@ class DynamicOutputBudget:
                 f"prompt_tokens={prompt_tokens}, max_tokens={dynamic_max_tokens}"
             ),
         }
+
+    def _resolve_output_budget(
+        self,
+        request: Dict[str, Any],
+        compression_window: int,
+        prompt_tokens: int,
+        safety_margin: int,
+    ) -> Optional[Tuple[str, int]]:
+        """Combine the window, caller cap, and backend wire constraint."""
+
+        dynamic_max_tokens = compute_max_tokens(
+            compression_window,
+            prompt_tokens,
+            safety_margin=safety_margin,
+        )
+        if dynamic_max_tokens is None:
+            return None
+        output_field = "max_tokens"
+        requested_output_cap = _requested_output_cap(
+            request,
+            self.backend.coerce_output_budget,
+        )
+        if requested_output_cap is not None:
+            output_field, requested_cap = requested_output_cap
+            dynamic_max_tokens = min(dynamic_max_tokens, requested_cap)
+        provider_limit = self.backend.output_budget_limit(
+            request,
+            context_length=self.settings.context_length,
+        )
+        if provider_limit is not None:
+            dynamic_max_tokens = min(dynamic_max_tokens, provider_limit)
+        return (output_field, dynamic_max_tokens) if dynamic_max_tokens > 0 else None
 
     def _matches_route(
         self,

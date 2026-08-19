@@ -9,7 +9,7 @@ import re
 import threading
 import urllib.request
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Callable, Dict, List, Optional, cast
 from urllib.parse import urlsplit
 
@@ -106,6 +106,17 @@ class VllmBackend(Backend):
 
         coerced = self._coerce_non_strict_integer(value)
         return coerced if coerced is not None and coerced > 0 else None
+
+    def output_budget_limit(
+        self,
+        request: Dict[str, Any],
+        *,
+        context_length: int,
+    ) -> Optional[int]:
+        """Respect vLLM's coupled prompt-truncation/output validation."""
+
+        truncation_limit = self._wire_prompt_truncation_limit(request)
+        return None if truncation_limit is None else context_length - truncation_limit
 
     def count(
         self,
@@ -246,7 +257,10 @@ class VllmBackend(Backend):
 
         if isinstance(tools, list):
             return tools
-        if isinstance(tools, Sequence) and not isinstance(tools, (str, bytes)):
+        if isinstance(tools, Collection) and not isinstance(
+            tools,
+            (str, bytes, Mapping),
+        ):
             return list(tools)
         return None
 
@@ -292,7 +306,23 @@ class VllmBackend(Backend):
         cls,
         request: Dict[str, Any],
     ) -> Optional[int]:
-        """Resolve vLLM's positive prompt truncation from the wire request."""
+        """Return a safe final-prompt cap derived from vLLM truncation."""
+
+        truncation_limit = cls._wire_prompt_truncation_limit(request)
+        if truncation_limit is None or cls._has_multimodal_content(request):
+            # vLLM truncates rendered text token IDs before expanding media
+            # placeholders.  The final prompt can therefore remain larger
+            # than this textual limit; the tokenize endpoint's expanded count
+            # is the only conservative value available to this client.
+            return None
+        return truncation_limit
+
+    @classmethod
+    def _wire_prompt_truncation_limit(
+        cls,
+        request: Dict[str, Any],
+    ) -> Optional[int]:
+        """Resolve vLLM's non-negative wire-level truncation constraint."""
 
         extra_body = request.get("extra_body")
         value = (
@@ -306,13 +336,7 @@ class VllmBackend(Backend):
         coerced = cls._coerce_non_strict_integer(value)
         if coerced == -1:
             return None
-        if coerced is None or coerced <= 0:
-            return None
-        if cls._has_multimodal_content(request):
-            # vLLM truncates rendered text token IDs before expanding media
-            # placeholders.  The final prompt can therefore remain larger
-            # than this textual limit; the tokenize endpoint's expanded count
-            # is the only conservative value available to this client.
+        if coerced is None or coerced < 0:
             return None
         return coerced
 
@@ -376,21 +400,28 @@ class VllmBackend(Backend):
             content = message.get("content")
             if isinstance(content, dict):
                 return True
-            if isinstance(content, list) and any(
-                not isinstance(part, (dict, str))
-                or (
-                    isinstance(part, dict)
-                    and part.get("type")
-                    not in {
-                        "text",
-                        "input_text",
-                        "output_text",
-                        "refusal",
-                        "thinking",
-                        "tool_reference",
-                    }
+            if (
+                isinstance(content, Sequence)
+                and not isinstance(
+                    content,
+                    (str, bytes),
                 )
-                for part in content
+                and any(
+                    not isinstance(part, (dict, str))
+                    or (
+                        isinstance(part, dict)
+                        and part.get("type")
+                        not in {
+                            "text",
+                            "input_text",
+                            "output_text",
+                            "refusal",
+                            "thinking",
+                            "tool_reference",
+                        }
+                    )
+                    for part in content
+                )
             ):
                 return True
         return False

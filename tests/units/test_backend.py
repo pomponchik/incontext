@@ -48,6 +48,24 @@ def test_backend_preserves_output_budget_alias_by_default() -> None:
     )
 
 
+def test_backend_adds_no_provider_output_limit_by_default() -> None:
+    """Keep third-party backends neutral when no wire constraint is declared.
+
+    Provider-specific schemas may couple prompt truncation to output length,
+    but existing backend plugins only promise exact token counting.  The
+    default extension must therefore leave their dynamic budget untouched
+    until a backend explicitly reports an additional limit.
+    """
+
+    assert (
+        ReplacementBackend().output_budget_limit(
+            {"model": "replacement", "messages": []},
+            context_length=1024,
+        )
+        is None
+    )
+
+
 def test_public_type_hints_resolve_on_every_supported_python() -> None:
     """Keep public annotations introspectable down to the Python 3.8 floor.
 

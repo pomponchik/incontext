@@ -40,6 +40,17 @@ class Backend(ABC):
 
         return requested_field
 
+    def output_budget_limit(
+        self,
+        request: Dict[str, Any],
+        *,
+        context_length: int,
+    ) -> Optional[int]:
+        """Return an additional provider wire limit, when one exists."""
+
+        del request, context_length
+        return None
+
     def coerce_output_budget(self, value: Any) -> Optional[int]:
         """Return a positive caller cap accepted by this provider."""
 
