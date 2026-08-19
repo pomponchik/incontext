@@ -26,17 +26,26 @@ def test_release_waits_for_every_behavioral_quality_workflow() -> None:
 
 
 def test_release_quality_workflows_expose_reusable_entry_points() -> None:
-    """Keep every release gate callable from the publishing workflow.
+    """Keep every release gate callable and aligned with Python support.
 
     A local workflow reference is accepted only when its target declares
     ``workflow_call``.  Checking all three files guards against a seemingly
     harmless trigger cleanup silently breaking the dependency chain that
-    protects the package index.
+    protects the package index.  Lint and unit jobs must also exercise every
+    interpreter promised by package metadata, including free-threaded Python.
     """
 
     for name in ("lint.yml", "tests_and_coverage.yml", "hermes_e2e.yml"):
         contents = (WORKFLOWS / name).read_text(encoding="utf-8")
         assert "  workflow_call:\n" in contents
+
+    python_matrix = (
+        'python-version: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13", '
+        '"3.14", "3.14t", "3.15.0-beta.1"]'
+    )
+    for name in ("lint.yml", "tests_and_coverage.yml"):
+        contents = (WORKFLOWS / name).read_text(encoding="utf-8")
+        assert python_matrix in contents
 
 
 def test_distribution_workflow_imports_wheel_code_in_isolation() -> None:
