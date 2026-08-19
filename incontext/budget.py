@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection, Mapping
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from .backend import Backend
@@ -10,6 +11,30 @@ from .settings import Settings, normalize_base_url
 
 LOGGER = logging.getLogger(__name__)
 OUTPUT_BUDGET_FIELDS = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+
+
+def _materialize_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Copy reusable OpenAI collections into their provider-visible shapes."""
+
+    messages = request.get("messages")
+    if not isinstance(messages, Collection) or isinstance(
+        messages,
+        (str, bytes, Mapping),
+    ):
+        return None
+    prepared = dict(request)
+    prepared["messages"] = list(messages)
+    extra_body = request.get("extra_body")
+    if isinstance(extra_body, Mapping):
+        prepared_extra = dict(extra_body)
+        nested_messages = prepared_extra.get("messages")
+        if isinstance(nested_messages, Collection) and not isinstance(
+            nested_messages,
+            (str, bytes, Mapping),
+        ):
+            prepared_extra["messages"] = list(nested_messages)
+        prepared["extra_body"] = prepared_extra
+    return prepared
 
 
 def compute_max_tokens(
@@ -53,7 +78,7 @@ def _requested_output_cap(
             for field in OUTPUT_BUDGET_FIELDS
             if (value := coerce(extra_body.get(field))) is not None
         ]
-        if isinstance(extra_body, dict)
+        if isinstance(extra_body, Mapping)
         else []
     )
     caps = [*top_level_caps, *nested_caps]
@@ -74,12 +99,12 @@ def estimate_request_tokens_rough(request: Dict[str, Any]) -> int:
     extra_body = request.get("extra_body")
     messages = (
         extra_body.get("messages", request.get("messages"))
-        if isinstance(extra_body, dict)
+        if isinstance(extra_body, Mapping)
         else request.get("messages")
     )
     tools = (
         extra_body.get("tools", request.get("tools"))
-        if isinstance(extra_body, dict)
+        if isinstance(extra_body, Mapping)
         else request.get("tools")
     )
     estimate = estimator(messages or [], tools=tools or None)
@@ -117,11 +142,12 @@ class DynamicOutputBudget:
     ) -> Optional[Dict[str, Any]]:
         """Rewrite output-cap aliases into one exact dynamic ``max_tokens``."""
 
-        if not isinstance(request, dict) or not isinstance(
-            request.get("messages"),
-            list,
-        ):
+        if not isinstance(request, dict):
             return None
+        prepared_request = _materialize_request(request)
+        if prepared_request is None:
+            return None
+        request = prepared_request
         if not self._matches_route(request, context):
             return None
 
@@ -182,7 +208,7 @@ class DynamicOutputBudget:
         for key in OUTPUT_BUDGET_FIELDS:
             rewritten.pop(key, None)
         extra_body = rewritten.get("extra_body")
-        if isinstance(extra_body, dict):
+        if isinstance(extra_body, Mapping):
             cleaned_extra_body = dict(extra_body)
             for key in OUTPUT_BUDGET_FIELDS:
                 cleaned_extra_body.pop(key, None)
@@ -247,7 +273,7 @@ class DynamicOutputBudget:
         extra_body = request.get("extra_body")
         model = (
             extra_body.get("model", request.get("model"))
-            if isinstance(extra_body, dict)
+            if isinstance(extra_body, Mapping)
             else request.get("model")
         )
         if model != self.settings.model_name:

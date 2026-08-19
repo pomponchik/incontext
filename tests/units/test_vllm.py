@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from importlib.metadata import version
+from types import MappingProxyType
 from typing import Any
 from unittest.mock import patch
 
@@ -154,6 +155,38 @@ def test_build_payload_includes_tools_and_template_kwargs() -> None:
     payload = VllmBackend._build_payload(request)
     assert payload["tools"] is request["tools"]
     assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_build_payload_honors_read_only_extra_body_overrides() -> None:
+    """Count Mapping overrides with the same precedence as OpenAI's SDK.
+
+    ``extra_body`` accepts any reusable Mapping and is shallow-merged after
+    ordinary request parameters.  Restricting recognition to mutable dicts
+    tokenizes the superseded model, messages, and tools, so exact budgeting can
+    use an unrelated chat template and undercount the actual prompt.
+    """
+
+    wire_messages = ({"role": "user", "content": "wire"},)
+    wire_tools = ({"type": "function", "function": {"name": "wire"}},)
+
+    payload = VllmBackend._build_payload(
+        {
+            "model": "top-model",
+            "messages": [],
+            "tools": [],
+            "extra_body": MappingProxyType(
+                {
+                    "model": "wire-model",
+                    "messages": wire_messages,
+                    "tools": wire_tools,
+                },
+            ),
+        },
+    )
+
+    assert payload["model"] == "wire-model"
+    assert payload["messages"] == list(wire_messages)
+    assert payload["tools"] == list(wire_tools)
 
 
 def test_build_payload_materializes_tuple_tools_like_openai_sdk() -> None:
@@ -452,6 +485,37 @@ def test_positive_response_integer_rejects_invalid_values(value: Any) -> None:
 
 def test_positive_response_integer_accepts_positive_integer() -> None:
     assert VllmBackend._positive_response_integer({"count": 1}, "count") == 1
+
+
+def test_count_accepts_and_caches_an_empty_rendered_prompt() -> None:
+    """Accept a legitimately empty token sequence reported by vLLM.
+
+    ``/tokenize`` defines count as ``len(input_ids)``, which can be zero when a
+    valid template emits no text and generation/special-token insertion are
+    disabled.  Rejecting zero discards an exact full-window budget and falls
+    back to a positive rough estimate plus margin; model context length remains
+    independently required to be positive.
+    """
+
+    backend, opener = make_backend([response(0)])
+    request = {
+        "model": "qwen",
+        "messages": [],
+        "add_generation_prompt": False,
+        "add_special_tokens": False,
+    }
+
+    assert backend.count(request, context_length=65_536) == 0
+    assert backend.count(request, context_length=65_536) == 0
+    assert len(opener.calls) == 1
+
+
+@pytest.mark.parametrize("value", [True, -1, 1.5, "0"])
+def test_nonnegative_response_integer_rejects_non_counts(value: Any) -> None:
+    """Keep malformed tokenizer counts outside the exact-budget contract."""
+
+    with pytest.raises(VllmBackend.VllmBackendError, match="invalid count"):
+        VllmBackend._nonnegative_response_integer({"count": value}, "count")
 
 
 @pytest.mark.parametrize("cache_entries", [True, "1"])

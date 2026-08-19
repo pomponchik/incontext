@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 import types
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -216,6 +217,100 @@ def test_runtime_uses_all_free_space_without_an_existing_output_cap(
     result = runtime(request={"model": "qwen", "messages": []})
     assert result is not None
     assert result["request"]["max_tokens"] == 45_705
+
+
+def test_runtime_budgets_reusable_message_collections(
+    runtime_settings: Settings,
+) -> None:
+    """Budget message tuples that the OpenAI client serializes as arrays.
+
+    Chat Completions declares messages as an iterable and materializes a tuple
+    before JSON encoding.  Returning early solely because Hermes supplied that
+    reusable sequence skips the dynamic cap for an otherwise valid request;
+    incontext must copy it without mutating the caller-owned collection.
+    """
+
+    messages = ({"role": "user", "content": "tuple prompt"},)
+    counter = Counter(10_000)
+    runtime = budget.DynamicOutputBudget(runtime_settings, counter)
+
+    result = runtime(request={"model": "qwen", "messages": messages})
+
+    assert result is not None
+    assert result["request"]["messages"] == list(messages)
+    assert result["request"]["max_tokens"] == 45_705
+    assert messages == ({"role": "user", "content": "tuple prompt"},)
+
+
+def test_runtime_cleans_output_caps_from_read_only_extra_body_mapping(
+    runtime_settings: Settings,
+) -> None:
+    """Honor every reusable Mapping accepted by OpenAI for extra_body.
+
+    The SDK shallow-merges ``extra_body`` after its generated request, so a
+    ``MappingProxyType`` is just as authoritative as a dict.  Leaving its
+    larger ``max_tokens`` intact overwrites the safe dynamic cap on the final
+    wire.  The rewrite must copy and clean the mapping without mutating the
+    caller-owned object.
+    """
+
+    nested_messages = ({"role": "user", "content": "wire prompt"},)
+    nested = MappingProxyType(
+        {
+            "messages": nested_messages,
+            "max_tokens": 1000,
+            "temperature": 0.25,
+        },
+    )
+    request = {
+        "model": "qwen",
+        "messages": [],
+        "extra_body": nested,
+    }
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(55_635))
+
+    result = runtime(request=request)
+
+    assert result is not None
+    rewritten = result["request"]
+    assert rewritten["max_tokens"] == 70
+    assert rewritten["extra_body"] == {
+        "messages": list(nested_messages),
+        "temperature": 0.25,
+    }
+    assert {**rewritten, **rewritten["extra_body"]}["max_tokens"] == 70
+    assert dict(nested) == {
+        "messages": nested_messages,
+        "max_tokens": 1000,
+        "temperature": 0.25,
+    }
+
+
+def test_runtime_rejects_model_override_in_read_only_extra_body_mapping(
+    runtime_settings: Settings,
+) -> None:
+    """Scope Mapping-based wire overrides before selecting a tokenizer.
+
+    OpenAI applies a read-only mapping exactly like a dict during its final
+    shallow merge.  Ignoring a nested model would count the fallback request
+    with the primary backend and context window even though a different model
+    is provider-visible.
+    """
+
+    counter = Counter(100)
+    runtime = budget.DynamicOutputBudget(runtime_settings, counter)
+
+    assert (
+        runtime(
+            request={
+                "model": "qwen",
+                "messages": [],
+                "extra_body": MappingProxyType({"model": "fallback"}),
+            },
+        )
+        is None
+    )
+    assert counter.requests == []
 
 
 def test_runtime_accepts_an_exact_zero_token_truncated_prompt(

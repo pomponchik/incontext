@@ -171,7 +171,7 @@ class VllmBackend(Backend):
             raise self.VllmBackendError(
                 "vLLM /tokenize returned a non-object response",
             )
-        count = self._positive_response_integer(response, "count")
+        count = self._nonnegative_response_integer(response, "count")
         reported_context = self._positive_response_integer(
             response,
             "max_model_len",
@@ -204,7 +204,7 @@ class VllmBackend(Backend):
         request: Dict[str, Any],
     ) -> Dict[str, Any]:
         extra_body = request.get("extra_body")
-        extra_body = extra_body if isinstance(extra_body, dict) else {}
+        extra_body = extra_body if isinstance(extra_body, Mapping) else {}
         messages = extra_body.get("messages", request.get("messages"))
         payload: Dict[str, Any] = {
             "model": extra_body.get("model", request.get("model")),
@@ -268,13 +268,19 @@ class VllmBackend(Backend):
     def _normalize_messages(messages: Any) -> Any:
         """Mirror vLLM's deprecated reasoning-field normalization."""
 
-        if not isinstance(messages, list) or not any(
-            isinstance(message, dict) and "reasoning_content" in message
-            for message in messages
+        if not isinstance(messages, Collection) or isinstance(
+            messages,
+            (str, bytes, Mapping),
         ):
             return messages
+        materialized = list(messages)
+        if not any(
+            isinstance(message, dict) and "reasoning_content" in message
+            for message in materialized
+        ):
+            return materialized
         normalized = []
-        for message in messages:
+        for message in materialized:
             if not isinstance(message, dict) or "reasoning_content" not in message:
                 normalized.append(message)
                 continue
@@ -296,6 +302,21 @@ class VllmBackend(Backend):
     ) -> int:
         value = response.get(key)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise cls.VllmBackendError(
+                f"vLLM /tokenize returned invalid {key}",
+            )
+        return value
+
+    @classmethod
+    def _nonnegative_response_integer(
+        cls,
+        response: Dict[str, Any],
+        key: str,
+    ) -> int:
+        """Read a response integer for a token sequence that may be empty."""
+
+        value = response.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise cls.VllmBackendError(
                 f"vLLM /tokenize returned invalid {key}",
             )
@@ -330,7 +351,7 @@ class VllmBackend(Backend):
                 "truncate_prompt_tokens",
                 request.get("truncate_prompt_tokens"),
             )
-            if isinstance(extra_body, dict)
+            if isinstance(extra_body, Mapping)
             else request.get("truncate_prompt_tokens")
         )
         coerced = cls._coerce_non_strict_integer(value)
@@ -364,7 +385,7 @@ class VllmBackend(Backend):
         extra_body = request.get("extra_body")
         params = (
             extra_body.get("kv_transfer_params", request.get("kv_transfer_params"))
-            if isinstance(extra_body, dict)
+            if isinstance(extra_body, Mapping)
             else request.get("kv_transfer_params")
         )
         if not isinstance(params, dict) or "prompt_token_ids" not in params:
@@ -389,10 +410,13 @@ class VllmBackend(Backend):
         extra_body = request.get("extra_body")
         messages = (
             extra_body.get("messages", request.get("messages"))
-            if isinstance(extra_body, dict)
+            if isinstance(extra_body, Mapping)
             else request.get("messages")
         )
-        if not isinstance(messages, list):
+        if not isinstance(messages, Collection) or isinstance(
+            messages,
+            (str, bytes, Mapping),
+        ):
             return False
         for message in messages:
             if not isinstance(message, dict):
