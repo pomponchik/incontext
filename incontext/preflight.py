@@ -6,7 +6,7 @@ import logging
 import threading
 from collections.abc import Collection, Mapping
 from importlib import import_module
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union, cast
 
 from .budget import DynamicOutputBudget
 from .settings import normalize_base_url
@@ -223,6 +223,12 @@ class _ExactPreflightGate:
 _install_lock = threading.Lock()
 
 
+def _original_binding(binding: Any, wrapper_type: Type[Any]) -> Any:
+    """Unwrap a released incontext binding before reinstalling it."""
+
+    return binding.original if isinstance(binding, wrapper_type) else binding
+
+
 def install(runtime: RuntimeSource) -> Optional[Cleanup]:
     """Make Hermes compress from the selected backend's exact token count.
 
@@ -259,16 +265,18 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
             if isinstance(current, _ExactPreflight) and current.owned:
                 wrapper = current
             else:
-                wrapper = _ExactPreflight(runtime, cast(RoughEstimator, current))
+                original = _original_binding(current, _ExactPreflight)
+                wrapper = _ExactPreflight(runtime, cast(RoughEstimator, original))
                 module.__dict__["estimate_request_tokens_rough"] = wrapper
             wrapper.acquire(owner, runtime)
             wrappers.append((module, "estimate_request_tokens_rough", wrapper))
         if isinstance(gate_binding, _ExactPreflightGate) and gate_binding.owned:
             gate_wrapper = gate_binding
         else:
+            gate_original = _original_binding(gate_binding, _ExactPreflightGate)
             gate_wrapper = _ExactPreflightGate(
                 runtime,
-                cast(Callable[..., bool], gate_binding),
+                cast(Callable[..., bool], gate_original),
             )
             turn_context.__dict__["_should_run_preflight_estimate"] = gate_wrapper
         gate_wrapper.acquire(owner, runtime)

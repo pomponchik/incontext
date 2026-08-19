@@ -755,11 +755,13 @@ def test_final_owner_release_cannot_race_active_preflight(is_gate: bool) -> None
 def test_cleanup_never_overwrites_later_preflight_bindings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Preserve another plugin's estimator replacement during unload.
+    """Preserve foreign bindings without chaining a restored stale wrapper.
 
     Cleanup owns only the exact wrapper object it installed.  If another plugin
     replaces that Hermes binding later, unloading incontext must leave the
-    foreign callable intact.
+    foreign callable intact.  That plugin can subsequently restore the wrapper
+    it originally found; reinstalling incontext must unwrap the now-ownerless
+    estimator and gate so fallback and final cleanup reach Hermes' originals.
     """
 
     def rough(
@@ -772,8 +774,11 @@ def test_cleanup_never_overwrites_later_preflight_bindings(
         return 5
 
     loop, turn_context = install_fake_hermes(monkeypatch, rough)
+    original_gate = turn_context.__dict__["_should_run_preflight_estimate"]
     cleanup = install(runtime(Counter(100)))
     assert callable(cleanup)
+    stale_wrapper = turn_context.estimate_request_tokens_rough
+    stale_gate = turn_context.__dict__["_should_run_preflight_estimate"]
 
     def replacement(
         messages: Any,
@@ -784,11 +789,27 @@ def test_cleanup_never_overwrites_later_preflight_bindings(
         del messages, system_prompt, tools
         return 99
 
+    def replacement_gate(*args: Any, **kwargs: Any) -> bool:
+        del args, kwargs
+        return False
+
     turn_context.estimate_request_tokens_rough = replacement  # type: ignore[attr-defined]
+    turn_context.__dict__["_should_run_preflight_estimate"] = replacement_gate
     cleanup()
 
     assert loop.estimate_request_tokens_rough is rough
     assert turn_context.estimate_request_tokens_rough is replacement
+    assert turn_context.__dict__["_should_run_preflight_estimate"] is replacement_gate
+
+    turn_context.estimate_request_tokens_rough = stale_wrapper  # type: ignore[attr-defined]
+    turn_context.__dict__["_should_run_preflight_estimate"] = stale_gate
+    second_cleanup = install(runtime(Counter(TimeoutError("offline"))))
+    assert callable(second_cleanup)
+    assert turn_context.estimate_request_tokens_rough([]) == 5 + 1024
+
+    second_cleanup()
+    assert turn_context.estimate_request_tokens_rough is rough
+    assert turn_context.__dict__["_should_run_preflight_estimate"] is original_gate
 
 
 def test_stale_preflight_cleanup_cannot_remove_new_installation(
