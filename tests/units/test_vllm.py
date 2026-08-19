@@ -1412,6 +1412,18 @@ def test_response_contract_is_validated(
     payload: dict[str, Any],
     message: str,
 ) -> None:
-    backend, _ = make_backend([payload])
+    """Reject malformed metadata without caching its partially valid count.
+
+    A stale tokenizer can return a valid count beside the wrong context length.
+    Validation must finish before cache publication so the next identical call
+    retries the server and cannot reuse a count from the rejected route.
+    """
+
+    backend, opener = make_backend([payload, response(7)])
+    request = {"model": "qwen", "messages": []}
+
     with pytest.raises(VllmBackend.VllmBackendError, match=message):
-        backend.count({"model": "qwen", "messages": []}, context_length=65_536)
+        backend.count(request, context_length=65_536)
+
+    assert backend.count(request, context_length=65_536) == 7
+    assert len(opener.calls) == 2
