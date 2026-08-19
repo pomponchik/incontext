@@ -1615,7 +1615,17 @@ def test_load_settings_reserves_hermes_configured_output_budget() -> None:
     ModernCompressor.calls.clear()
     config = {
         **base_config,
-        "model": {**base_config["model"], "max_tokens": "8192"},
+        "model": {
+            **base_config["model"],
+            "provider": "custom:local",
+            "max_tokens": "8192",
+        },
+        "providers": {
+            "local": {
+                "api": "https://inference.example/v1",
+                "max_output_tokens": 2048,
+            },
+        },
     }
 
     load(config=config)
@@ -1635,8 +1645,17 @@ def test_load_settings_reserves_hermes_environment_output_budget() -> None:
     ModernCompressor.calls.clear()
     config = {
         **base_config,
-        "model": {**base_config["model"], "max_tokens": 4096},
-        "providers": {"custom": {"max_output_tokens": 2048}},
+        "model": {
+            **base_config["model"],
+            "provider": "custom:local",
+            "max_tokens": 4096,
+        },
+        "providers": {
+            "local": {
+                "api": "https://inference.example/v1",
+                "max_output_tokens": 2048,
+            },
+        },
     }
 
     load(environment={"HERMES_MAX_TOKENS": "8192"}, config=config)
