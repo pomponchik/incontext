@@ -34,10 +34,35 @@ class _AuxiliaryBudget:
         self.original = original
         self.output_cap_selector = output_cap_selector
         self.signature: Signature = signature(original)
+        self._owners: Tuple[
+            Tuple[object, RuntimeSource, Optional[OutputCapSelector]], ...
+        ] = ()
+
+    def acquire(
+        self,
+        owner: object,
+        runtime: RuntimeSource,
+        output_cap_selector: Optional[OutputCapSelector],
+    ) -> None:
+        """Add one installation without mutating an earlier owner's state."""
+
+        self._owners = (*self._owners, (owner, runtime, output_cap_selector))
+
+    def release(self, owner: object) -> None:
+        """Remove exactly one installation while retaining all other owners."""
+
+        self._owners = tuple(entry for entry in self._owners if entry[0] is not owner)
+
+    @property
+    def owned(self) -> bool:
+        """Return whether at least one live installation owns this wrapper."""
+
+        return bool(self._owners)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
         original_request = self.original(*args, **kwargs)
-        runtime = self._runtime()
+        runtime_source, output_cap_selector = self._configuration()
+        runtime = self._runtime(runtime_source)
         if runtime is None:
             return original_request
         bound = self.signature.bind(*args, **kwargs)
@@ -78,16 +103,24 @@ class _AuxiliaryBudget:
                 and max_tokens > 0
                 else runtime.settings.compression_window
             )
-            request = {**request, **self._output_cap(seed, model)}
+            request = {
+                **request,
+                **self._output_cap(seed, model, output_cap_selector),
+            }
         result = runtime(request=request)
         return original_request if result is None else result["request"]
 
-    def _output_cap(self, value: int, model: Any) -> Dict[str, int]:
+    def _output_cap(
+        self,
+        value: int,
+        model: Any,
+        output_cap_selector: Optional[OutputCapSelector],
+    ) -> Dict[str, int]:
         """Select Hermes' provider-specific output-cap alias safely."""
 
-        if self.output_cap_selector is not None:
+        if output_cap_selector is not None:
             try:
-                selected = self.output_cap_selector(value, model=model)
+                selected = output_cap_selector(value, model=model)
             except Exception:  # noqa: BLE001
                 selected = None
             if isinstance(selected, dict):
@@ -102,10 +135,22 @@ class _AuxiliaryBudget:
                     return valid
         return {"max_tokens": value}
 
-    def _runtime(self) -> Optional[DynamicOutputBudget]:
-        if isinstance(self.runtime_source, DynamicOutputBudget):
-            return self.runtime_source
-        return self.runtime_source()
+    def _configuration(
+        self,
+    ) -> Tuple[RuntimeSource, Optional[OutputCapSelector]]:
+        """Read one coherent owner snapshot for the complete request."""
+
+        owners = self._owners
+        if owners:
+            _, runtime, output_cap_selector = owners[-1]
+            return runtime, output_cap_selector
+        return self.runtime_source, self.output_cap_selector
+
+    @staticmethod
+    def _runtime(runtime_source: RuntimeSource) -> Optional[DynamicOutputBudget]:
+        if isinstance(runtime_source, DynamicOutputBudget):
+            return runtime_source
+        return runtime_source()
 
     def _argument(self, arguments: Dict[str, Any], name: str) -> Any:
         if name in arguments:
@@ -120,7 +165,6 @@ class _AuxiliaryBudget:
 
 _install_lock = threading.Lock()
 _installed_wrapper: Optional[_AuxiliaryBudget] = None
-_install_count = 0
 
 
 def _new_wrapper(
@@ -173,7 +217,8 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
         return None
     auxiliary_client, current = loaded
 
-    global _install_count, _installed_wrapper  # noqa: PLW0603
+    owner = object()
+    global _installed_wrapper  # noqa: PLW0603
     with _install_lock:
         output_cap_selector = auxiliary_client.__dict__.get(
             "auxiliary_max_tokens_param"
@@ -183,9 +228,6 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
         if current is _installed_wrapper:
             wrapper = _installed_wrapper
             assert wrapper is not None
-            wrapper.runtime_source = runtime
-            wrapper.output_cap_selector = output_cap_selector
-            _install_count += 1
         else:
             created = _new_wrapper(runtime, current, output_cap_selector)
             if created is None:
@@ -193,7 +235,7 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
             wrapper = created
             auxiliary_client.__dict__["_build_call_kwargs"] = wrapper
             _installed_wrapper = wrapper
-            _install_count = 1
+        wrapper.acquire(owner, runtime, output_cap_selector)
 
     closed = False
 
@@ -201,15 +243,15 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
         """Release one owner and restore Hermes after the final unload."""
 
         nonlocal closed
-        global _install_count, _installed_wrapper  # noqa: PLW0603
+        global _installed_wrapper  # noqa: PLW0603
         with _install_lock:
             if closed:
                 return
             closed = True
             if _installed_wrapper is not wrapper:
                 return
-            _install_count -= 1
-            if _install_count == 0:
+            wrapper.release(owner)
+            if not wrapper.owned:
                 if auxiliary_client.__dict__.get("_build_call_kwargs") is wrapper:
                     auxiliary_client.__dict__["_build_call_kwargs"] = wrapper.original
                 _installed_wrapper = None

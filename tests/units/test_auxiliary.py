@@ -641,6 +641,44 @@ def test_install_is_idempotent_and_updates_the_runtime(
     ]
 
 
+def test_latest_auxiliary_owner_cleanup_restores_previous_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore the surviving profile's runtime when the newest owner unloads.
+
+    Hermes may load two plugin managers into one process, so the process-wide
+    auxiliary builder temporarily follows the most recently installed owner.
+    Unloading that owner must reveal the earlier runtime again; retaining the
+    removed runtime would tokenize later requests with a stale model, backend,
+    or compression window even though its profile no longer owns the plugin.
+    """
+
+    auxiliary, _ = install_fake_hermes(monkeypatch)
+    first = Counter(10_000)
+    second = Counter(20_000)
+    first_cleanup = install(runtime(first))
+    second_cleanup = install(runtime(second))
+    assert callable(first_cleanup)
+    assert callable(second_cleanup)
+
+    newest = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "newest"}],
+    )
+    second_cleanup()
+    restored = auxiliary._build_call_kwargs(  # type: ignore[attr-defined]
+        "custom",
+        "qwen-test",
+        [{"role": "user", "content": "restored"}],
+    )
+
+    assert newest["max_tokens"] == 44_000
+    assert restored["max_tokens"] == 54_000
+    assert len(first.requests) == 1
+    assert len(second.requests) == 1
+
+
 def test_cleanup_restores_builder_after_the_last_plugin_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
