@@ -4,8 +4,9 @@ from typing import Any, get_type_hints
 from unittest.mock import patch
 
 import pytest
-from pristan.errors import OneResolutionError
+from pristan.errors import OneResolutionError, PrimadonnaPluginError
 
+import incontext
 from incontext.backend import Backend, backends
 from incontext.budget import DynamicOutputBudget
 from incontext.hermes import apply_incontext, register
@@ -30,7 +31,11 @@ class ReplacementBackend(Backend):
         return None
 
 
-def test_backend_contract_is_abstract() -> None:
+def test_backend_contract_is_public_and_abstract() -> None:
+    """Expose the extension contract at the documented package boundary."""
+
+    assert incontext.Backend is Backend
+    assert incontext.backends is backends
     with pytest.raises(TypeError):
         Backend()  # type: ignore[abstract]
 
@@ -118,13 +123,26 @@ def test_bundled_vllm_provider_is_selected_by_name() -> None:
 
 
 def test_named_backend_can_replace_the_bundled_backend() -> None:
+    """Resolve one named plugin and reject an ambiguous duplicate provider.
+
+    Third-party packages register through the slot without repeating its
+    uniqueness policy.  A second distribution using the same selected name
+    must fail during discovery instead of making startup order-dependent.
+    """
+
     expected = ReplacementBackend()
 
-    @backends.plugin("unit_replacement", unique=True)
+    @backends.plugin("unit_replacement")
     def provide_replacement() -> Backend:
         return expected
 
     assert backends["unit_replacement"].one() is expected
+
+    with pytest.raises(PrimadonnaPluginError):
+
+        @backends.plugin("unit_replacement")
+        def provide_duplicate() -> Backend:
+            return ReplacementBackend()
 
 
 def test_unknown_backend_name_fails_single_plugin_resolution() -> None:
