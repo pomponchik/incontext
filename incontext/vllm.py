@@ -127,6 +127,7 @@ class VllmBackend(Backend):
         """Return the exact provider-visible prompt token count."""
 
         reused_prompt_tokens = self._reused_prompt_token_count(request)
+        self._validate_prompt_controls(request, reused_prompt_tokens)
         truncation_limit = (
             None
             if reused_prompt_tokens is not None
@@ -214,11 +215,6 @@ class VllmBackend(Backend):
         normalized_tools = VllmBackend._normalize_tools(tools)
         if normalized_tools is not None:
             payload["tools"] = normalized_tools
-        VllmBackend._validate_prompt_controls(
-            request,
-            extra_body,
-            normalized_tools,
-        )
         prompt_options = (
             "add_generation_prompt",
             "continue_final_message",
@@ -262,11 +258,17 @@ class VllmBackend(Backend):
     @staticmethod
     def _validate_prompt_controls(
         request: Dict[str, Any],
-        extra_body: Mapping[str, Any],
-        tools: Optional[List[Any]],
+        reused_prompt_tokens: Optional[int],
     ) -> None:
         """Reject generation controls absent from vLLM's tokenize schema."""
 
+        if reused_prompt_tokens is not None:
+            return
+        extra_body = request.get("extra_body")
+        extra_body = extra_body if isinstance(extra_body, Mapping) else {}
+        tools = VllmBackend._normalize_tools(
+            extra_body.get("tools", request.get("tools")),
+        )
         tool_choice = extra_body.get("tool_choice", request.get("tool_choice"))
         if tools and tool_choice not in (None, "auto"):
             raise VllmBackend.VllmBackendError(

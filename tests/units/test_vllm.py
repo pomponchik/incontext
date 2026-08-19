@@ -330,13 +330,15 @@ def test_count_rejects_prompt_controls_missing_from_tokenize_schema(
     therefore fail before transport and let the middleware estimate safely.
     """
 
-    backend, opener = make_backend()
+    backend, opener = make_backend([response(7)])
     request: dict[str, Any] = {
         "model": "qwen",
         "messages": [],
         "tools": [{"type": "function", "function": {"name": "lookup"}}],
         "tool_choice": "auto",
     }
+    assert backend.count(request, context_length=65_536) == 7
+
     if in_extra_body:
         request["extra_body"] = {field: value}
     else:
@@ -345,7 +347,7 @@ def test_count_rejects_prompt_controls_missing_from_tokenize_schema(
     with pytest.raises(VllmBackend.VllmBackendError, match=field):
         backend.count(request, context_length=65_536)
 
-    assert opener.calls == []
+    assert len(opener.calls) == 1
 
 
 def test_build_payload_applies_extra_body_to_core_chat_fields() -> None:
@@ -1210,16 +1212,20 @@ def test_count_uses_disaggregated_decode_prompt_token_ids() -> None:
     bypass chat-template rendering because the prefill node has already
     produced the prompt.  Incontext must use that list length, while still
     calling ``/tokenize`` once to verify the server's advertised context
-    length.  Token-ID changes can then reuse that validation cache safely.
+    length.  Renderer-only controls cannot invalidate an already final token
+    sequence, and token-ID changes can reuse the validation cache safely.
     """
 
     backend, opener = make_backend([response(999)])
     request = {
         "model": "qwen",
         "messages": [{"role": "user", "content": "not the decode prompt"}],
+        "tools": [{"type": "function", "function": {"name": "lookup"}}],
+        "response_format": {"type": "json_object"},
         "truncate_prompt_tokens": -1,
         "kv_transfer_params": {"prompt_token_ids": [1, 2]},
         "extra_body": {
+            "tool_choice": "none",
             "kv_transfer_params": {
                 "prompt_token_ids": (0, 4, 8, 15, 16, 23, 42),
             },
