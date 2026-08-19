@@ -70,8 +70,10 @@ def _acquire_profile_runtime(
 
     with _runtime_lock:
         runtime = _runtimes.get(key)
-    if runtime is None:
-        candidate = build_runtime()
+        if runtime is not None:
+            _active_profiles[key] = _active_profiles.get(key, 0) + 1
+            return runtime, _profile_cleanup(key)
+    candidate = build_runtime()
     with _runtime_lock:
         runtime = _runtimes.get(key)
         if runtime is None:

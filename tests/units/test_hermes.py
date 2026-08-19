@@ -231,6 +231,67 @@ def test_concurrent_registration_retains_its_validated_runtime(
     assert hermes._runtimes == {"profile-a": runtime}
 
 
+def test_profile_runtime_acquisition_closes_the_final_unload_gap(
+    runtime_settings: Settings,
+) -> None:
+    """Keep an existing runtime while a concurrent final owner unloads.
+
+    A registering manager used to read the cached runtime, release the mutex,
+    and acquire its owner only in a second critical section.  The old owner's
+    final unload could evict the cache in that gap, leaving registration to
+    reference an uninitialized build candidate and raise ``UnboundLocalError``.
+    This lock double forces that exact interleaving after the first critical
+    section and proves the new owner is visible before unload can invalidate
+    the runtime.
+    """
+
+    runtime = mock.Mock()
+    runtime.settings = runtime_settings
+    real_lock = threading.Lock()
+    first_release = threading.Event()
+    unload_finished = threading.Event()
+    registration_thread = threading.current_thread()
+
+    class InterleavingLock:
+        armed = True
+
+        def __enter__(self) -> None:
+            real_lock.acquire()
+
+        def __exit__(self, *error: Any) -> None:
+            real_lock.release()
+            if threading.current_thread() is registration_thread and self.armed:
+                self.armed = False
+                first_release.set()
+                assert unload_finished.wait(timeout=2)
+
+    hermes._runtimes["profile-a"] = runtime
+    hermes._active_profiles["profile-a"] = 1
+
+    def unload() -> None:
+        assert first_release.wait(timeout=2)
+        hermes._deactivate_profile("profile-a")
+        unload_finished.set()
+
+    worker = threading.Thread(target=unload)
+    worker.start()
+    with mock.patch.object(
+        hermes, "_runtime_lock", InterleavingLock()
+    ), mock.patch.object(
+        hermes,
+        "build_runtime",
+        side_effect=AssertionError("existing runtime must not be rebuilt"),
+    ):
+        acquired, cleanup = hermes._acquire_profile_runtime("profile-a")
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert acquired is runtime
+    assert callable(cleanup)
+    assert hermes._runtimes == {"profile-a": runtime}
+    assert hermes._active_profiles == {"profile-a": 1}
+
+
 def test_profile_runtime_builder_can_query_active_runtime_without_deadlock(
     runtime_settings: Settings,
 ) -> None:
