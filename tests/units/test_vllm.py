@@ -233,8 +233,9 @@ def test_build_payload_recursively_materializes_openai_wire_mappings() -> None:
     """
 
     content_part = MappingProxyType({"type": "text", "text": "hello"})
+    content_parts = {"only": content_part}
     message = MappingProxyType(
-        {"role": "user", "content": (content_part,)},
+        {"role": "user", "content": content_parts.values()},
     )
     function = MappingProxyType(
         {"name": "lookup", "parameters": MappingProxyType({"type": "object"})},
@@ -265,7 +266,7 @@ def test_build_payload_recursively_materializes_openai_wire_mappings() -> None:
         ],
         "add_generation_prompt": True,
     }
-    assert message["content"][0] is content_part
+    assert next(iter(message["content"])) is content_part
     assert tool["function"] is function
 
 
@@ -920,13 +921,13 @@ def test_count_does_not_cap_multimodal_prompt_after_media_expansion() -> None:
     assert backend.count(request, context_length=65_536) == 120
 
 
-def test_count_detects_tuple_multimodal_content_materialized_by_openai() -> None:
-    """Keep the expanded count for reusable non-list content sequences.
+def test_count_detects_reusable_multimodal_content_materialized_by_openai() -> None:
+    """Keep the expanded count for reusable non-list content collections.
 
     The OpenAI Python client accepts an iterable of content parts and converts
-    a tuple to a JSON array before vLLM renders it.  Looking only for Python
-    lists misclassifies the image as text-only and clamps the expanded prompt
-    to the textual truncation limit, which over-allocates completion tokens.
+    ``dict_values`` to a JSON array before vLLM renders it.  Looking only for
+    sequences misclassifies the image as text-only and clamps the expanded
+    prompt, which over-allocates completion tokens.
     """
 
     backend, _ = make_backend([response(120)])
@@ -935,10 +936,13 @@ def test_count_detects_tuple_multimodal_content_materialized_by_openai() -> None
         "messages": [
             {
                 "role": "user",
-                "content": (
-                    {"type": "text", "text": "describe"},
-                    {"type": "image_url", "image_url": {"url": "data:"}},
-                ),
+                "content": {
+                    "text": {"type": "text", "text": "describe"},
+                    "image": {
+                        "type": "image_url",
+                        "image_url": {"url": "data:"},
+                    },
+                }.values(),
             },
         ],
         "truncate_prompt_tokens": 50,

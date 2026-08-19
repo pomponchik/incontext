@@ -263,7 +263,7 @@ class VllmBackend(Backend):
                 key: VllmBackend._materialize_wire_value(nested)
                 for key, nested in value.items()
             }
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        if isinstance(value, Collection) and not isinstance(value, (str, bytes)):
             return [VllmBackend._materialize_wire_value(item) for item in value]
         return value
 
@@ -444,18 +444,18 @@ class VllmBackend(Backend):
             if not isinstance(message, Mapping):
                 continue
             content = message.get("content")
-            if isinstance(content, dict):
+            if isinstance(content, Mapping):
                 return True
             if (
-                isinstance(content, Sequence)
+                isinstance(content, Collection)
                 and not isinstance(
                     content,
                     (str, bytes),
                 )
                 and any(
-                    not isinstance(part, (dict, str))
+                    not isinstance(part, (Mapping, str))
                     or (
-                        isinstance(part, dict)
+                        isinstance(part, Mapping)
                         and part.get("type")
                         not in {
                             "text",
