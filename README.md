@@ -81,16 +81,15 @@ This addresses the same output-budget arithmetic discussed in
 
 ## Installation
 
-Once release 0.0.3 or newer is available on PyPI, install and enable the package
-using the same plugin name, `incontext`:
+Install the published package from PyPI and enable it using the same plugin
+name, `incontext`:
 
 ```bash
-python -m pip install 'incontext>=0.0.3'
+python -m pip install incontext
 hermes plugins enable incontext
 ```
 
-Until that safety-complete release is published, install the current `develop`
-branch:
+To use the current development branch instead, install it directly from GitHub:
 
 ```bash
 python -m pip install 'git+https://github.com/pomponchik/incontext.git@develop'
@@ -112,7 +111,6 @@ endpoint of the same vLLM model Hermes uses:
 export INCONTEXT_BACKEND='vllm'
 export INCONTEXT_TOKENIZER_URL='https://inference.example/tokenize'
 export INCONTEXT_TOKENIZER_TIMEOUT_SECONDS='30'
-export INCONTEXT_TOKENIZER_USER_AGENT='incontext/0.0.3'
 export INCONTEXT_FALLBACK_MARGIN_TOKENS='1024'
 export INCONTEXT_MIN_OUTPUT_TOKENS='4096'
 ```
@@ -134,7 +132,7 @@ The optional variables are:
 |---|---:|---|
 | `INCONTEXT_BACKEND` | `vllm` | Named `pristan` backend plugin |
 | `INCONTEXT_TOKENIZER_TIMEOUT_SECONDS` | `30` | `/tokenize` request timeout |
-| `INCONTEXT_TOKENIZER_USER_AGENT` | `incontext/0.0.3` | HTTP user agent |
+| `INCONTEXT_TOKENIZER_USER_AGENT` | automatic | HTTP user agent derived from installed package metadata |
 | `INCONTEXT_FALLBACK_MARGIN_TOKENS` | `1024` | Extra reserve only when exact tokenization fails |
 | `INCONTEXT_MIN_OUTPUT_TOKENS` | `4096` | Minimum viable output budget before compression is required |
 | `INCONTEXT_COMPRESSION_WINDOW_TOKENS` | unset | Explicit emergency override for the resolved Hermes boundary |
