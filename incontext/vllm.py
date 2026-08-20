@@ -10,6 +10,7 @@ import threading
 import urllib.request
 from collections import OrderedDict
 from collections.abc import Collection, Mapping, Sequence
+from importlib.metadata import version as distribution_version
 from typing import Any, Callable, Dict, List, Optional, cast
 from urllib.parse import urlsplit
 
@@ -40,7 +41,7 @@ class VllmEnvironment(
         read_only=True,
     )
     tokenizer_user_agent: str = Field(
-        "incontext/0.0.3",
+        f"incontext/{distribution_version('incontext')}",
         conversion=lambda value: value.strip(),
         validation={
             "tokenizer_user_agent must not be blank": lambda value: bool(value),
