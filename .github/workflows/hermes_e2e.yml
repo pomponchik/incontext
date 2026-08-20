@@ -31,7 +31,7 @@ jobs:
           python -m pip install build==1.2.2.post1
           python -m build --wheel
 
-      - name: Run against real Hermes plugin discovery and middleware
+      - name: Run real Hermes plugin, middleware, and compression loop
         env:
           HERMES_IMAGE: ${{ matrix.hermes-image }}
         run: |
