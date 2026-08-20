@@ -12,42 +12,65 @@
 
 ![incontext logo](https://raw.githubusercontent.com/pomponchik/incontext/develop/docs/assets/logo.svg)
 
-`incontext` is a Hermes Agent plugin that gives each LLM request exactly the
-output budget still available below Hermes' context-compression boundary. It
-prevents a fixed, oversized `max_tokens` value from consuming the input space
-where Hermes must still be able to compress the conversation.
+`incontext` is a Hermes Agent plugin that gives each LLM request a viable
+output budget below Hermes' context-compression boundary. It prevents a fixed,
+oversized `max_tokens` value from consuming input space, but also refuses to
+manufacture tiny completions that are technically valid and operationally
+useless to an agent.
 
-The plugin reads the effective compression window from the installed Hermes
-`ContextCompressor`, asks the selected inference backend to tokenize the exact
-provider-visible prompt, and applies:
+## Algorithm
+
+The policy uses these values:
+
+- `W` is Hermes' effective compression window, read from the installed
+  `ContextCompressor`.
+- `P` is the exact number of tokens in the provider-visible prompt.
+- `R` is the minimum viable output reserve. It is configured with
+  `INCONTEXT_MIN_OUTPUT_TOKENS` and defaults to `4096`. An explicit smaller
+  Hermes-wide output cap lowers `R`, because that cap is an operator decision.
+- `B` is an optional positive output cap on an individual request.
+- `F` is `INCONTEXT_FALLBACK_MARGIN_TOKENS`, used only when exact tokenization
+  is unavailable.
+
+Before Hermes constructs the main provider request, incontext reports this
+token pressure to its compression preflight:
 
 ```text
-max_tokens = min(
-    caller_max_tokens,
-    compression_window - prompt_tokens,
-)
+preflight_pressure = P + R - 1
 ```
 
-When the caller does not provide an output cap, `incontext` uses the whole
-free remainder of the compression window. A smaller positive caller cap is
-preserved, which keeps bounded auxiliary operations such as Hermes context
-summarization from becoming unexpectedly long.
+Hermes compresses when that pressure is at least `W`. Therefore compression is
+requested exactly when `W - P < R`. The subtraction of one is intentional: a
+prompt with exactly `R` tokens of output space remains valid, while a prompt
+with `R - 1` tokens does not.
 
-Hermes auxiliary calls (including context-compression summaries, generated
-titles, and vision helpers) do not pass through the public `llm_request`
-middleware. Hermes also omits `max_tokens` for most custom providers. The
-plugin therefore wraps Hermes' auxiliary request builder at registration time:
-those requests receive the same exact budget, and an explicit smaller caller
-cap is not lost. If exact counting cannot produce a safe result, the wrapper
-leaves Hermes' original request unchanged.
+After the final request has been constructed, the middleware counts it again
+and computes:
 
-The expression is applied only while its result is positive. A zero or
-negative result is not converted to the invalid sentinel `max_tokens=1`.
-Instead, incontext installs the same exact counter into Hermes' pre-API
-compression estimator, so Hermes compacts the conversation before it creates
-the provider request. If the tokenizer is temporarily unavailable, this bridge
-falls back to Hermes' native rough estimator and the request middleware itself
-remains fail-open.
+```text
+required_output = min(R, B) if B is present else R
+remaining       = W - P
+max_tokens      = min(remaining, B) if B is present else remaining
+```
+
+The middleware inserts the output cap only when `remaining >= required_output`.
+Otherwise it leaves the request unchanged: the preflight path owns main-turn
+compression, and fail-open behavior is safer for call sites that bypass it than
+sending a predictably truncated tool call or text fragment. A provider-specific
+output constraint must also leave at least `required_output` tokens.
+
+A smaller positive caller cap is preserved and becomes that request's required
+minimum. This keeps deliberately bounded operations, such as context summaries
+and generated titles, bounded. Without an explicit smaller cap, incontext never
+dynamically emits `max_tokens` below `R`; in particular it does not turn an
+exhausted window into `max_tokens=1`.
+
+Hermes auxiliary calls do not pass through the public `llm_request` middleware,
+and Hermes omits `max_tokens` for most custom providers. The plugin therefore
+wraps the auxiliary request builder with the same budgeting rule. If exact
+tokenization fails, both preflight and middleware use Hermes' rough estimate
+plus `F`, so they retain the same decision boundary. If both estimators fail,
+the original request is left unchanged.
 
 This addresses the same output-budget arithmetic discussed in
 [NousResearch/hermes-agent#38652](https://github.com/NousResearch/hermes-agent/issues/38652).
@@ -87,6 +110,7 @@ export INCONTEXT_TOKENIZER_URL='https://inference.example/tokenize'
 export INCONTEXT_TOKENIZER_TIMEOUT_SECONDS='30'
 export INCONTEXT_TOKENIZER_USER_AGENT='incontext/0.0.2'
 export INCONTEXT_FALLBACK_MARGIN_TOKENS='1024'
+export INCONTEXT_MIN_OUTPUT_TOKENS='4096'
 ```
 
 Environment variables are loaded through typed `skelet.Storage` fields backed
@@ -108,6 +132,7 @@ The optional variables are:
 | `INCONTEXT_TOKENIZER_TIMEOUT_SECONDS` | `30` | `/tokenize` request timeout |
 | `INCONTEXT_TOKENIZER_USER_AGENT` | `incontext/0.0.2` | HTTP user agent |
 | `INCONTEXT_FALLBACK_MARGIN_TOKENS` | `1024` | Extra reserve only when exact tokenization fails |
+| `INCONTEXT_MIN_OUTPUT_TOKENS` | `4096` | Minimum viable output budget before compression is required |
 | `INCONTEXT_COMPRESSION_WINDOW_TOKENS` | unset | Explicit emergency override for the resolved Hermes boundary |
 
 The former `HERMES_VLLM_TOKENIZER_*` and
@@ -189,7 +214,8 @@ Only the selected provider is instantiated. An unknown name fails `.one()`;
 the unique slot rejects duplicate providers under the same name while loading
 entry points. Startup therefore fails instead of choosing a backend implicitly.
 Each backend owns and validates its backend-specific configuration; the generic
-settings object contains only the compression-window and fallback-budget policy.
+settings object contains only the compression-window, viability-reserve, and
+fallback-budget policy.
 
 ## Safety properties
 
@@ -198,8 +224,8 @@ settings object contains only the compression-window and fallback-budget policy.
 - The returned `max_model_len` must equal Hermes' configured context length.
 - `max_tokens`, `max_completion_tokens`, and `max_output_tokens` are reduced to
   the smallest positive caller cap while preserving the corresponding
-  provider-selected field name; a full compression window is handed to
-  preflight compression.
+  provider-selected field name; an implicit cap below the minimum viable
+  output reserve is handed to preflight compression.
 - The incoming request is copied and never mutated.
 - Exact counts use a bounded, thread-safe cache.
 - The exact counter is also used by Hermes' preflight compressor, eliminating
