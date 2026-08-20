@@ -13,6 +13,12 @@ from incontext.budget import DynamicOutputBudget
 from incontext.preflight import _ExactPreflight, _ExactPreflightGate, install
 from incontext.settings import Settings
 
+MINIMUM_OUTPUT_TOKENS = 4096
+
+
+def pressure(prompt_tokens: int) -> int:
+    return prompt_tokens + MINIMUM_OUTPUT_TOKENS - 1
+
 
 class Counter(Backend):
     def __init__(self, result: int | BaseException) -> None:
@@ -41,6 +47,7 @@ def runtime(counter: Counter) -> DynamicOutputBudget:
             context_length=65_536,
             compression_window=64_000,
             fallback_margin_tokens=1024,
+            min_output_tokens=4096,
             provider="",
             base_url="",
         ),
@@ -92,14 +99,11 @@ def test_install_replaces_rough_preflight_with_exact_backend(
 
     assert callable(cleanup)
     assert loop.estimate_request_tokens_rough is rough
-    assert (
-        turn_context.estimate_request_tokens_rough(
-            [{"role": "user", "content": "large"}],
-            system_prompt="Follow the policy",
-            tools=[{"type": "function"}],
-        )
-        == 64_000
-    )
+    assert turn_context.estimate_request_tokens_rough(
+        [{"role": "user", "content": "large"}],
+        system_prompt="Follow the policy",
+        tools=[{"type": "function"}],
+    ) == pressure(64_000)
     assert counter.requests == [
         {
             "model": "qwen-test",
@@ -135,13 +139,10 @@ def test_install_patches_the_turn_context_binding_used_for_compression(
     _, turn_context = install_fake_hermes(monkeypatch, rough)
     install(runtime(Counter(123)))
 
-    assert (
-        turn_context.estimate_request_tokens_rough(
-            [{"role": "user", "content": "large"}],
-            tools=[{"type": "function"}],
-        )
-        == 123
-    )
+    assert turn_context.estimate_request_tokens_rough(
+        [{"role": "user", "content": "large"}],
+        tools=[{"type": "function"}],
+    ) == pressure(123)
 
 
 def test_preflight_counts_provider_visible_api_content_without_mutation(
@@ -176,7 +177,7 @@ def test_preflight_counts_provider_visible_api_content_without_mutation(
     counter = Counter(321)
     install(runtime(counter))
 
-    assert turn_context.estimate_request_tokens_rough(messages) == 321
+    assert turn_context.estimate_request_tokens_rough(messages) == pressure(321)
     assert counter.requests == [
         {
             "model": "qwen-test",
@@ -215,14 +216,11 @@ def test_install_forces_exact_preflight_before_message_only_gate(
 
     assert not turn_context._should_run_preflight_estimate.original([], 3, 20, 64_000)  # type: ignore[attr-defined]
     assert turn_context._should_run_preflight_estimate([], 3, 20, 64_000)  # type: ignore[attr-defined]
-    assert (
-        turn_context.estimate_request_tokens_rough(
-            [],
-            system_prompt="large policy",
-            tools=({"type": "function"},),
-        )
-        == 60_000
-    )
+    assert turn_context.estimate_request_tokens_rough(
+        [],
+        system_prompt="large policy",
+        tools=({"type": "function"},),
+    ) == pressure(60_000)
     assert counter.requests == [
         {
             "model": "qwen-test",
@@ -262,6 +260,31 @@ def test_preflight_uses_rough_estimate_after_live_model_switch(
     assert not turn_context._should_run_preflight_estimate([], 3, 20, 64_000)  # type: ignore[attr-defined]
     assert loop.estimate_request_tokens_rough([]) == 17
     assert counter.requests == []
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens", "expected_pressure", "requires_compression"),
+    [
+        (64_000 - MINIMUM_OUTPUT_TOKENS, 63_999, False),
+        (64_000 - MINIMUM_OUTPUT_TOKENS + 1, 64_000, True),
+    ],
+)
+def test_preflight_pressure_matches_the_viable_output_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_tokens: int,
+    expected_pressure: int,
+    requires_compression: bool,
+) -> None:
+    _, turn_context = install_fake_hermes(
+        monkeypatch,
+        lambda messages, *, system_prompt="", tools=None: 1,
+    )
+    install(runtime(Counter(prompt_tokens)))
+
+    result = turn_context.estimate_request_tokens_rough([])
+
+    assert result == expected_pressure
+    assert (result >= 64_000) is requires_compression
 
 
 def test_live_route_reader_supports_legacy_hermes_globals(
@@ -341,6 +364,7 @@ def test_preflight_route_guard_checks_provider_and_endpoint(
             context_length=65_536,
             compression_window=64_000,
             fallback_margin_tokens=1024,
+            min_output_tokens=4096,
             provider="custom",
             base_url="https://primary.invalid/v1",
         ),
@@ -376,7 +400,7 @@ def test_preflight_preserves_empty_tool_shape(
     counter = Counter(123)
     install(runtime(counter))
 
-    assert turn_context.estimate_request_tokens_rough([]) == 123
+    assert turn_context.estimate_request_tokens_rough([]) == pressure(123)
     assert counter.requests == [{"model": "qwen-test", "messages": []}]
 
 
@@ -407,14 +431,11 @@ def test_preflight_falls_back_when_backend_fails(
     _, turn_context = install_fake_hermes(monkeypatch, rough)
     install(runtime(Counter(TimeoutError("secret"))))
 
-    assert (
-        turn_context.estimate_request_tokens_rough(
-            [{"role": "user", "content": "fallback"}],
-            system_prompt="system fallback",
-            tools=[],
-        )
-        == 321 + 1024
-    )
+    assert turn_context.estimate_request_tokens_rough(
+        [{"role": "user", "content": "fallback"}],
+        system_prompt="system fallback",
+        tools=[],
+    ) == pressure(321 + 1024)
     assert "TimeoutError" in caplog.text
     assert "secret" not in caplog.text
 
@@ -504,12 +525,12 @@ def test_install_is_idempotent_and_retains_the_initial_fallback(
     second_cleanup = install(runtime(second))
     assert callable(first_cleanup)
     assert callable(second_cleanup)
-    assert turn_context.estimate_request_tokens_rough([]) == 200
+    assert turn_context.estimate_request_tokens_rough([]) == pressure(200)
     assert first.requests == []
     assert second.requests == [{"model": "qwen-test", "messages": []}]
 
     second_cleanup()
-    assert turn_context.estimate_request_tokens_rough([]) == 100
+    assert turn_context.estimate_request_tokens_rough([]) == pressure(100)
     assert first.requests == [{"model": "qwen-test", "messages": []}]
     assert second.requests == [{"model": "qwen-test", "messages": []}]
     first_cleanup()
@@ -621,7 +642,7 @@ def test_install_snapshot_is_serialized_with_final_owner_cleanup(
     assert len(new_cleanups) == 1
     new_cleanup = new_cleanups[0]
     assert callable(new_cleanup)
-    assert turn_context.estimate_request_tokens_rough([]) == 5 + 1024
+    assert turn_context.estimate_request_tokens_rough([]) == pressure(5 + 1024)
 
     new_cleanup()
     assert turn_context.estimate_request_tokens_rough is rough
@@ -654,7 +675,7 @@ def test_preflight_runtime_resolver_tracks_the_active_profile() -> None:
 
     wrapper = _ExactPreflight(resolve, rough)
 
-    assert wrapper([]) == 456
+    assert wrapper([]) == pressure(456)
     assert calls == [None]
 
 
@@ -805,7 +826,7 @@ def test_cleanup_never_overwrites_later_preflight_bindings(
     turn_context.__dict__["_should_run_preflight_estimate"] = stale_gate
     second_cleanup = install(runtime(Counter(TimeoutError("offline"))))
     assert callable(second_cleanup)
-    assert turn_context.estimate_request_tokens_rough([]) == 5 + 1024
+    assert turn_context.estimate_request_tokens_rough([]) == pressure(5 + 1024)
 
     second_cleanup()
     assert turn_context.estimate_request_tokens_rough is rough

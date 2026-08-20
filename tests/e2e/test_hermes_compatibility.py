@@ -87,6 +87,41 @@ plugins:
     )
 
 
+def assert_viable_output_boundary(
+    runtime: Any,
+    apply_middleware: Any,
+) -> None:
+    """Exercise the exact reserve boundary through real Hermes bindings."""
+
+    from agent import turn_context  # type: ignore[import-not-found]  # noqa: PLC0415
+
+    previous_prompt_tokens = TokenizerHandler.prompt_tokens
+    previous_request_count = len(TokenizerHandler.requests)
+    boundary_request = {
+        "model": "qwen-e2e",
+        "messages": [{"role": "user", "content": "Cross the viable boundary"}],
+    }
+    try:
+        TokenizerHandler.prompt_tokens = (
+            runtime.settings.compression_window - runtime.settings.min_output_tokens + 1
+        )
+        runtime.backend.clear_cache()
+        pressure = turn_context.estimate_request_tokens_rough(  # type: ignore[attr-defined]
+            boundary_request["messages"],
+        )
+        assert pressure == runtime.settings.compression_window
+
+        boundary_result = apply_middleware(
+            boundary_request,
+            session_id="incontext-boundary-e2e",
+        )
+        assert boundary_result.changed is False
+        assert "max_tokens" not in boundary_result.payload
+        assert len(TokenizerHandler.requests) == previous_request_count + 1
+    finally:
+        TokenizerHandler.prompt_tokens = previous_prompt_tokens
+
+
 def test_pypi_entrypoint_rewrites_a_real_hermes_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -218,3 +253,9 @@ def test_pypi_entrypoint_rewrites_a_real_hermes_request(
     # the first request, so VllmBackend correctly serves it from cache. The two
     # distinct auxiliary prompts each require one additional tokenizer call.
     assert len(TokenizerHandler.requests) == 3
+
+    # One token below the viable reserve is a compression condition, not a
+    # request for a tiny length-truncated completion. The real Hermes preflight
+    # sees pressure exactly at its threshold, while middleware fails open if it
+    # is invoked directly before that compression has happened.
+    assert_viable_output_boundary(runtime, apply_llm_request_middleware)

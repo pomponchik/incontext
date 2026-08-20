@@ -67,3 +67,14 @@ def test_readme_does_not_describe_a_mutable_branch_as_reviewed_revision() -> Non
 
     assert "install the current `develop`\nbranch" in contents
     assert "reviewed `develop`" not in contents
+
+
+def test_readme_documents_the_viable_output_algorithm() -> None:
+    contents = README.read_text(encoding="utf-8")
+
+    assert "## Algorithm" in contents
+    assert "INCONTEXT_MIN_OUTPUT_TOKENS" in contents
+    assert "preflight_pressure = P + R - 1" in contents
+    assert "W - P < R" in contents
+    assert "exactly `R` tokens of output space remains valid" in contents
+    assert "does not turn an\nexhausted window into `max_tokens=1`" in contents

@@ -41,6 +41,7 @@ def runtime(counter: Counter) -> DynamicOutputBudget:
             context_length=65_536,
             compression_window=64_000,
             fallback_margin_tokens=1024,
+            min_output_tokens=4096,
             provider="",
             base_url="",
         ),
@@ -354,6 +355,7 @@ def test_auxiliary_wrapper_ignores_same_model_on_another_route() -> None:
             context_length=65_536,
             compression_window=64_000,
             fallback_margin_tokens=1024,
+            min_output_tokens=4096,
             provider="custom",
             base_url="https://primary.invalid/v1",
         ),
@@ -400,6 +402,7 @@ def test_auxiliary_budgets_synthetic_main_agent_fallback_label() -> None:
             context_length=65_536,
             compression_window=64_000,
             fallback_margin_tokens=1024,
+            min_output_tokens=4096,
             provider="custom",
             base_url="https://primary.invalid/v1",
         ),
@@ -443,6 +446,7 @@ def test_auxiliary_wrapper_ignores_same_endpoint_on_another_provider() -> None:
             context_length=65_536,
             compression_window=64_000,
             fallback_margin_tokens=1024,
+            min_output_tokens=4096,
             provider="custom",
             base_url="https://shared.invalid/v1",
         ),
@@ -485,6 +489,7 @@ def test_auxiliary_accepts_canonical_equivalent_route() -> None:
             context_length=65_536,
             compression_window=64_000,
             fallback_margin_tokens=1024,
+            min_output_tokens=4096,
             provider="custom",
             base_url="https://primary.invalid/v1",
         ),
@@ -605,7 +610,12 @@ def test_auxiliary_budget_never_increases_the_caller_cap(
         max_tokens=caller_cap,
     )
 
-    assert result["max_tokens"] == min(caller_cap, 64_000 - prompt_tokens)
+    free_space = 64_000 - prompt_tokens
+    required_output = min(4096, caller_cap)
+    if free_space < required_output:
+        assert "max_tokens" not in result
+    else:
+        assert result["max_tokens"] == min(caller_cap, free_space)
 
 
 def test_auxiliary_fails_open_when_compression_is_required(
