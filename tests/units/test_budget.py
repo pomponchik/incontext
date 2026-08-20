@@ -46,50 +46,102 @@ class Counter(Backend):
 
 
 @pytest.mark.parametrize(
-    ("window", "prompt", "margin", "expected"),
+    ("window", "prompt", "margin", "minimum", "expected"),
     [
-        (64_000, 1_000, 0, 63_000),
-        (64_000, 1_000, 1024, 61_976),
-        (64_000, 0, 0, 64_000),
-        (64_000, 64_000, 0, None),
-        (64_000, 70_000, 0, None),
+        (64_000, 1_000, 0, 1, 63_000),
+        (64_000, 1_000, 1024, 1, 61_976),
+        (64_000, 0, 0, 4096, 64_000),
+        (64_000, 60_000, 0, 4000, 4000),
+        (64_000, 60_001, 0, 4000, None),
+        (64_000, 63_999, 0, 1, 1),
+        (64_000, 64_000, 0, 1, None),
+        (64_000, 70_000, 0, 1, None),
     ],
 )
 def test_compute_max_tokens_boundaries(
     window: int,
     prompt: int,
     margin: int,
+    minimum: int,
     expected: int | None,
 ) -> None:
-    assert budget.compute_max_tokens(window, prompt, safety_margin=margin) == expected
+    assert (
+        budget.compute_max_tokens(
+            window,
+            prompt,
+            safety_margin=margin,
+            minimum_output_tokens=minimum,
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
-    ("window", "prompt", "margin", "message"),
+    ("window", "prompt", "margin", "minimum", "message"),
     [
-        (0, 1, 0, "compression_window"),
-        (1, -1, 0, "prompt_tokens"),
-        (1, 1, -1, "safety_margin"),
+        (0, 1, 0, 1, "compression_window"),
+        (1, -1, 0, 1, "prompt_tokens"),
+        (1, 1, -1, 1, "safety_margin"),
+        (1, 1, 0, 0, "minimum_output_tokens"),
     ],
 )
 def test_compute_max_tokens_rejects_invalid_inputs(
     window: int,
     prompt: int,
     margin: int,
+    minimum: int,
     message: str,
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        budget.compute_max_tokens(window, prompt, safety_margin=margin)
+        budget.compute_max_tokens(
+            window,
+            prompt,
+            safety_margin=margin,
+            minimum_output_tokens=minimum,
+        )
 
 
 @given(
     window=st.integers(min_value=1, max_value=1_000_000),
     prompt=st.integers(min_value=0, max_value=2_000_000),
     margin=st.integers(min_value=0, max_value=100_000),
+    minimum=st.integers(min_value=1, max_value=100_000),
 )
-def test_compute_max_tokens_invariants(window: int, prompt: int, margin: int) -> None:
-    result = budget.compute_max_tokens(window, prompt, safety_margin=margin)
-    assert result == (window - prompt - margin if window > prompt + margin else None)
+def test_compute_max_tokens_invariants(
+    window: int,
+    prompt: int,
+    margin: int,
+    minimum: int,
+) -> None:
+    result = budget.compute_max_tokens(
+        window,
+        prompt,
+        safety_margin=margin,
+        minimum_output_tokens=minimum,
+    )
+    remaining = window - prompt - margin
+    assert result == (remaining if remaining >= minimum else None)
+
+
+def test_compression_pressure_preserves_the_exact_minimum_boundary() -> None:
+    window = 64_000
+    minimum = 4096
+
+    assert budget.compression_pressure_tokens(window - minimum, minimum) == window - 1
+    assert budget.compression_pressure_tokens(window - minimum + 1, minimum) == window
+
+
+@pytest.mark.parametrize(
+    ("prompt", "minimum", "message"),
+    [(-1, 1, "prompt_tokens"), (0, 0, "minimum_output_tokens")],
+)
+def test_compression_pressure_rejects_invalid_inputs(
+    prompt: int,
+    minimum: int,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        budget.compression_pressure_tokens(prompt, minimum)
 
 
 def install_estimator(monkeypatch: pytest.MonkeyPatch, value: Any) -> None:
@@ -219,6 +271,74 @@ def test_runtime_uses_all_free_space_without_an_existing_output_cap(
     assert result["request"]["max_tokens"] == 45_705
 
 
+def test_runtime_accepts_exactly_the_minimum_viable_output(
+    runtime_settings: Settings,
+) -> None:
+    prompt_tokens = (
+        runtime_settings.compression_window - runtime_settings.min_output_tokens
+    )
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(prompt_tokens))
+
+    result = runtime(request={"model": "qwen", "messages": []})
+
+    assert result is not None
+    assert result["request"]["max_tokens"] == runtime_settings.min_output_tokens
+
+
+def test_runtime_rejects_a_positive_but_unviable_output_budget(
+    runtime_settings: Settings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    prompt_tokens = (
+        runtime_settings.compression_window - runtime_settings.min_output_tokens + 1
+    )
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(prompt_tokens))
+
+    with caplog.at_level(logging.WARNING):
+        assert runtime(request={"model": "qwen", "messages": []}) is None
+
+    assert "action=requires_compression" in caplog.text
+
+
+@pytest.mark.parametrize("caller_cap", [1, 2048])
+def test_runtime_treats_an_explicit_smaller_cap_as_intentional(
+    runtime_settings: Settings,
+    caller_cap: int,
+) -> None:
+    prompt_tokens = runtime_settings.compression_window - caller_cap
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(prompt_tokens))
+
+    result = runtime(
+        request={
+            "model": "qwen",
+            "messages": [],
+            "max_tokens": caller_cap,
+        },
+    )
+
+    assert result is not None
+    assert result["request"]["max_tokens"] == caller_cap
+
+
+def test_runtime_requires_even_an_explicit_cap_to_fit(
+    runtime_settings: Settings,
+) -> None:
+    caller_cap = 2048
+    prompt_tokens = runtime_settings.compression_window - caller_cap + 1
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(prompt_tokens))
+
+    assert (
+        runtime(
+            request={
+                "model": "qwen",
+                "messages": [],
+                "max_tokens": caller_cap,
+            },
+        )
+        is None
+    )
+
+
 def test_runtime_budgets_reusable_message_collections(
     runtime_settings: Settings,
 ) -> None:
@@ -267,18 +387,18 @@ def test_runtime_cleans_output_caps_from_read_only_extra_body_mapping(
         "messages": [],
         "extra_body": nested,
     }
-    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(55_635))
+    runtime = budget.DynamicOutputBudget(runtime_settings, Counter(54_705))
 
     result = runtime(request=request)
 
     assert result is not None
     rewritten = result["request"]
-    assert rewritten["max_tokens"] == 70
+    assert rewritten["max_tokens"] == 1000
     assert rewritten["extra_body"] == {
         "messages": list(nested_messages),
         "temperature": 0.25,
     }
-    assert {**rewritten, **rewritten["extra_body"]}["max_tokens"] == 70
+    assert {**rewritten, **rewritten["extra_body"]}["max_tokens"] == 1000
     assert dict(nested) == {
         "messages": nested_messages,
         "max_tokens": 1000,
@@ -359,6 +479,7 @@ def test_runtime_applies_an_additional_provider_output_limit() -> None:
             context_length=100,
             compression_window=100,
             fallback_margin_tokens=1,
+            min_output_tokens=10,
             provider="",
             base_url="",
         ),
@@ -375,6 +496,33 @@ def test_runtime_applies_an_additional_provider_output_limit() -> None:
 
     assert result is not None
     assert result["request"]["max_tokens"] == 10
+
+
+def test_runtime_rejects_a_provider_limit_below_the_viability_reserve() -> None:
+    class LimitedCounter(Counter):
+        def output_budget_limit(
+            self,
+            request: dict[str, Any],
+            *,
+            context_length: int,
+        ) -> int:
+            del request, context_length
+            return 9
+
+    runtime = budget.DynamicOutputBudget(
+        Settings(
+            model_name="qwen",
+            context_length=100,
+            compression_window=100,
+            fallback_margin_tokens=1,
+            min_output_tokens=10,
+            provider="",
+            base_url="",
+        ),
+        LimitedCounter(10),
+    )
+
+    assert runtime(request={"model": "qwen", "messages": []}) is None
 
 
 def test_runtime_fails_open_when_provider_output_space_is_exhausted(
@@ -404,6 +552,7 @@ def test_runtime_fails_open_when_provider_output_space_is_exhausted(
             context_length=100,
             compression_window=100,
             fallback_margin_tokens=1,
+            min_output_tokens=10,
             provider="",
             base_url="",
         ),
@@ -433,6 +582,7 @@ def test_runtime_preserves_the_provider_selected_output_field(field: str) -> Non
         context_length=65_536,
         compression_window=55_705,
         fallback_margin_tokens=1024,
+        min_output_tokens=4096,
         provider="",
         base_url="",
     )
@@ -476,6 +626,7 @@ def test_runtime_uses_backend_supported_output_budget_field() -> None:
         context_length=65_536,
         compression_window=55_705,
         fallback_margin_tokens=1024,
+        min_output_tokens=4096,
         provider="",
         base_url="",
     )
@@ -552,6 +703,7 @@ def test_runtime_removes_extra_body_output_cap_override() -> None:
         context_length=1000,
         compression_window=800,
         fallback_margin_tokens=10,
+        min_output_tokens=50,
         provider="",
         base_url="",
     )
@@ -595,6 +747,7 @@ def test_nested_smaller_cap_preserves_top_level_provider_field() -> None:
         context_length=1000,
         compression_window=800,
         fallback_margin_tokens=10,
+        min_output_tokens=50,
         provider="",
         base_url="",
     )
@@ -672,6 +825,7 @@ def test_existing_output_cap_is_never_increased(
         context_length=65_536,
         compression_window=55_705,
         fallback_margin_tokens=1024,
+        min_output_tokens=4096,
         provider="",
         base_url="",
     )
@@ -687,8 +841,15 @@ def test_existing_output_cap_is_never_increased(
             "max_tokens": requested_cap,
         },
     )
-    assert result is not None
-    assert result["request"]["max_tokens"] == min(free_space, requested_cap)
+    required_output = min(
+        runtime_settings.min_output_tokens,
+        requested_cap,
+    )
+    if free_space < required_output:
+        assert result is None
+    else:
+        assert result is not None
+        assert result["request"]["max_tokens"] == min(free_space, requested_cap)
 
 
 @pytest.mark.parametrize("wire_cap", ["5", 5.0])
@@ -716,6 +877,7 @@ def test_runtime_honors_output_caps_coerced_by_backend(
         context_length=1000,
         compression_window=800,
         fallback_margin_tokens=10,
+        min_output_tokens=50,
         provider="",
         base_url="",
     )
@@ -859,6 +1021,7 @@ def test_runtime_ignores_same_model_on_a_different_provider_route() -> None:
             context_length=1000,
             compression_window=800,
             fallback_margin_tokens=10,
+            min_output_tokens=50,
             provider="custom",
             base_url="https://primary.invalid/v1",
         ),
@@ -893,6 +1056,7 @@ def test_runtime_accepts_canonical_equivalent_route() -> None:
             context_length=1000,
             compression_window=800,
             fallback_margin_tokens=10,
+            min_output_tokens=50,
             provider="custom",
             base_url="https://primary.invalid/v1",
         ),

@@ -54,6 +54,13 @@ class Environment(
         },
         read_only=True,
     )
+    min_output_tokens: int = Field(
+        4096,
+        validation={
+            "min_output_tokens must be positive": lambda value: value > 0,
+        },
+        read_only=True,
+    )
     compression_window_tokens: int = Field(
         0,
         validation={
@@ -91,6 +98,7 @@ class Settings:
         "compression_window",
         "context_length",
         "fallback_margin_tokens",
+        "min_output_tokens",
         "model_name",
         "provider",
     )
@@ -99,6 +107,7 @@ class Settings:
     context_length: int
     compression_window: int
     fallback_margin_tokens: int
+    min_output_tokens: int
     provider: str
     base_url: str
 
@@ -661,6 +670,28 @@ def _resolve_compression_window(
     )
 
 
+def _validate_budget_reserves(
+    compression_window: int,
+    fallback_margin: int,
+    min_output_tokens: int,
+) -> None:
+    """Reject reserves that cannot leave a viable fallback request."""
+
+    if fallback_margin >= compression_window:
+        raise SettingsError(
+            "fallback_margin_tokens must be below the compression window",
+        )
+    if min_output_tokens >= compression_window:
+        raise SettingsError(
+            "min_output_tokens must be below the compression window",
+        )
+    if fallback_margin + min_output_tokens >= compression_window:
+        raise SettingsError(
+            "fallback_margin_tokens plus min_output_tokens must be below "
+            "the compression window",
+        )
+
+
 def load_settings(
     *,
     environment: Optional[Environment] = None,
@@ -760,16 +791,24 @@ def load_settings(
         )
 
     fallback_margin = environment.fallback_margin_tokens
-    if fallback_margin >= compression_window:
-        raise SettingsError(
-            "fallback_margin_tokens must be below the compression window",
-        )
+    min_output_tokens = environment.min_output_tokens
+    if max_tokens is not None:
+        # An explicit Hermes output cap is the operator's declaration that a
+        # smaller completion is useful.  Keep that bounded policy instead of
+        # forcing the generic viability reserve on every main-agent request.
+        min_output_tokens = min(min_output_tokens, max_tokens)
+    _validate_budget_reserves(
+        compression_window,
+        fallback_margin,
+        min_output_tokens,
+    )
 
     return Settings(
         model_name=model_name,
         context_length=context_length,
         compression_window=compression_window,
         fallback_margin_tokens=fallback_margin,
+        min_output_tokens=min_output_tokens,
         provider=provider,
         base_url=base_url,
     )

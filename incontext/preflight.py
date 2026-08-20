@@ -8,7 +8,7 @@ from collections.abc import Collection, Mapping
 from importlib import import_module
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union, cast
 
-from .budget import DynamicOutputBudget
+from .budget import DynamicOutputBudget, compression_pressure_tokens
 from .settings import normalize_base_url
 
 LOGGER = logging.getLogger(__name__)
@@ -152,9 +152,13 @@ class _ExactPreflight:
         ):
             request["tools"] = list(tools)
         try:
-            return runtime.backend.count(
+            prompt_tokens = runtime.backend.count(
                 request,
                 context_length=runtime.settings.context_length,
+            )
+            return compression_pressure_tokens(
+                prompt_tokens,
+                runtime.settings.min_output_tokens,
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
@@ -172,7 +176,10 @@ class _ExactPreflight:
                     ),
                 ),
             )
-            return rough_tokens + runtime.settings.fallback_margin_tokens
+            return compression_pressure_tokens(
+                rough_tokens + runtime.settings.fallback_margin_tokens,
+                runtime.settings.min_output_tokens,
+            )
 
     def _runtime(self) -> Optional[DynamicOutputBudget]:
         owners = self._owners

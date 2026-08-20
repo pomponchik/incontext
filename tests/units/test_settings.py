@@ -165,6 +165,7 @@ def test_skelet_environment_prefers_primary_and_converts_fields() -> None:
         {
             "INCONTEXT_BACKEND": " custom_backend ",
             "INCONTEXT_FALLBACK_MARGIN_TOKENS": "256",
+            "INCONTEXT_MIN_OUTPUT_TOKENS": "2048",
             "HERMES_DYNAMIC_BUDGET_FALLBACK_MARGIN_TOKENS": "999",
         },
         clear=True,
@@ -173,6 +174,7 @@ def test_skelet_environment_prefers_primary_and_converts_fields() -> None:
 
     assert environment.backend == "custom_backend"
     assert environment.fallback_margin_tokens == 256
+    assert environment.min_output_tokens == 2048
     assert environment.compression_window_tokens == 0
 
 
@@ -189,7 +191,51 @@ def test_skelet_environment_reads_process_environment() -> None:
 
     assert environment.backend == "vllm"
     assert environment.fallback_margin_tokens == 256
+    assert environment.min_output_tokens == 4096
     assert environment.compression_window_tokens == 50_000
+
+
+def test_load_settings_uses_configured_minimum_output_reserve() -> None:
+    result = load(environment={"INCONTEXT_MIN_OUTPUT_TOKENS": "3072"})
+
+    assert result.min_output_tokens == 3072
+
+
+def test_load_settings_accepts_the_last_viable_fallback_policy() -> None:
+    """Allow the equality edge that still leaves one token for the prompt."""
+
+    result = load(
+        environment={
+            "INCONTEXT_COMPRESSION_WINDOW_TOKENS": "5000",
+            "INCONTEXT_FALLBACK_MARGIN_TOKENS": "2000",
+            "INCONTEXT_MIN_OUTPUT_TOKENS": "2999",
+        },
+    )
+
+    assert result.compression_window == 5000
+    assert result.fallback_margin_tokens + result.min_output_tokens == 4999
+
+
+def test_load_settings_rejects_a_fallback_policy_with_no_viable_prompt() -> None:
+    """Reject individually valid reserves whose sum exhausts the window.
+
+    Hermes' rough estimator is normalized to at least one prompt token.  When
+    ``F + R >= W``, even that smallest prompt cannot retain ``R`` output tokens,
+    so fallback preflight would request compression forever without a viable
+    post-compression budget.
+    """
+
+    with pytest.raises(
+        settings.SettingsError,
+        match="fallback_margin_tokens plus min_output_tokens must be below",
+    ):
+        load(
+            environment={
+                "INCONTEXT_COMPRESSION_WINDOW_TOKENS": "5000",
+                "INCONTEXT_FALLBACK_MARGIN_TOKENS": "3000",
+                "INCONTEXT_MIN_OUTPUT_TOKENS": "3000",
+            },
+        )
 
 
 def test_normalized_model_thresholds_keeps_only_finite_numbers() -> None:
@@ -254,6 +300,7 @@ def test_load_settings_uses_real_compressor_threshold() -> None:
         context_length=65_536,
         compression_window=55_705,
         fallback_margin_tokens=1024,
+        min_output_tokens=4096,
         provider="custom",
         base_url="https://inference.example/v1",
     )
@@ -1628,9 +1675,10 @@ def test_load_settings_reserves_hermes_configured_output_budget() -> None:
         },
     }
 
-    load(config=config)
+    result = load(config=config)
 
     assert ModernCompressor.calls[-1]["max_tokens"] == 8192
+    assert result.min_output_tokens == 4096
 
 
 def test_load_settings_reserves_hermes_environment_output_budget() -> None:
@@ -1658,9 +1706,10 @@ def test_load_settings_reserves_hermes_environment_output_budget() -> None:
         },
     }
 
-    load(environment={"HERMES_MAX_TOKENS": "8192"}, config=config)
+    result = load(environment={"HERMES_MAX_TOKENS": "8192"}, config=config)
 
     assert ModernCompressor.calls[-1]["max_tokens"] == 8192
+    assert result.min_output_tokens == 4096
 
 
 def test_load_settings_uses_only_a_selected_provider_output_budget() -> None:
@@ -1689,9 +1738,10 @@ def test_load_settings_uses_only_a_selected_provider_output_budget() -> None:
         },
     }
 
-    load(config=config)
+    result = load(config=config)
 
     assert ModernCompressor.calls[-1]["max_tokens"] == 2048
+    assert result.min_output_tokens == 2048
 
     ModernCompressor.calls.clear()
     load(
@@ -1731,14 +1781,16 @@ def test_load_settings_reserves_provider_max_tokens_alias() -> None:
         },
     }
 
-    load(config=config)
+    result = load(config=config)
 
     assert ModernCompressor.calls[-1]["max_tokens"] == 2048
+    assert result.min_output_tokens == 2048
 
     config["providers"]["local"]["max_output_tokens"] = 1024
-    load(config=config)
+    result = load(config=config)
 
     assert ModernCompressor.calls[-1]["max_tokens"] == 1024
+    assert result.min_output_tokens == 1024
 
 
 def test_blank_hermes_max_tokens_falls_back_to_model_configuration() -> None:
@@ -1756,9 +1808,21 @@ def test_blank_hermes_max_tokens_falls_back_to_model_configuration() -> None:
         "model": {**base_config["model"], "max_tokens": 4096},
     }
 
-    load(environment={"HERMES_MAX_TOKENS": ""}, config=config)
+    result = load(environment={"HERMES_MAX_TOKENS": ""}, config=config)
 
     assert ModernCompressor.calls[-1]["max_tokens"] == 4096
+    assert result.min_output_tokens == 4096
+
+
+def test_explicit_hermes_cap_lowers_the_minimum_output_reserve() -> None:
+    result = load(
+        config={
+            **base_config,
+            "model": {**base_config["model"], "max_tokens": 1},
+        },
+    )
+
+    assert result.min_output_tokens == 1
 
 
 def test_invalid_hermes_max_tokens_fails_native_environment_validation() -> None:
@@ -2089,6 +2153,14 @@ def test_load_settings_rejects_window_above_context() -> None:
         ),
         (
             {**base_environment, "INCONTEXT_FALLBACK_MARGIN_TOKENS": "55705"},
+            "below",
+        ),
+        (
+            {**base_environment, "INCONTEXT_MIN_OUTPUT_TOKENS": "0"},
+            "positive",
+        ),
+        (
+            {**base_environment, "INCONTEXT_MIN_OUTPUT_TOKENS": "55705"},
             "below",
         ),
     ],

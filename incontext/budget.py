@@ -55,12 +55,14 @@ def compute_max_tokens(
     prompt_tokens: int,
     *,
     safety_margin: int = 0,
+    minimum_output_tokens: int = 1,
 ) -> Optional[int]:
-    """Return free output space, or ``None`` when compression is required.
+    """Return viable output space, or ``None`` when compression is required.
 
-    OpenAI-compatible APIs do not accept a zero-token completion.  Returning
-    ``1`` for an already-full compression window is therefore unsafe: it turns
-    a preflight condition into a request that the provider must reject.
+    A technically positive completion can still be unusable for an agent.  The
+    minimum keeps tiny length-truncated replies and tool calls out of the wire
+    request while retaining ``1`` as the default for callers of this helper
+    that only need its original positive-space contract.
     """
 
     if compression_window <= 0:
@@ -69,8 +71,26 @@ def compute_max_tokens(
         raise ValueError("prompt_tokens must not be negative")
     if safety_margin < 0:
         raise ValueError("safety_margin must not be negative")
+    if minimum_output_tokens <= 0:
+        raise ValueError("minimum_output_tokens must be positive")
     remaining = compression_window - prompt_tokens - safety_margin
-    return remaining if remaining > 0 else None
+    return remaining if remaining >= minimum_output_tokens else None
+
+
+def compression_pressure_tokens(
+    prompt_tokens: int,
+    minimum_output_tokens: int,
+) -> int:
+    """Include the viability reserve in Hermes' preflight pressure count."""
+
+    if prompt_tokens < 0:
+        raise ValueError("prompt_tokens must not be negative")
+    if minimum_output_tokens <= 0:
+        raise ValueError("minimum_output_tokens must be positive")
+    # Hermes compresses at ``pressure >= compression_window``.  Subtracting
+    # one preserves the useful equality case where exactly the minimum output
+    # budget remains: P + (R - 1) < W iff W - P >= R.
+    return prompt_tokens + minimum_output_tokens - 1
 
 
 def _requested_output_cap(
@@ -243,17 +263,24 @@ class DynamicOutputBudget:
         """Combine the window, caller cap, and backend wire constraint."""
 
         try:
+            requested_output_cap = _requested_output_cap(
+                request,
+                self.backend.coerce_output_budget,
+            )
+            minimum_output_tokens = self.settings.min_output_tokens
+            if requested_output_cap is not None:
+                minimum_output_tokens = min(
+                    minimum_output_tokens,
+                    requested_output_cap[1],
+                )
             dynamic_max_tokens = compute_max_tokens(
                 compression_window,
                 prompt_tokens,
                 safety_margin=safety_margin,
+                minimum_output_tokens=minimum_output_tokens,
             )
             output_field = "max_tokens"
             if dynamic_max_tokens is not None:
-                requested_output_cap = _requested_output_cap(
-                    request,
-                    self.backend.coerce_output_budget,
-                )
                 if requested_output_cap is not None:
                     output_field, requested_cap = requested_output_cap
                     dynamic_max_tokens = min(dynamic_max_tokens, requested_cap)
@@ -270,7 +297,7 @@ class DynamicOutputBudget:
                 type(backend_error).__name__,
             )
             return None
-        if dynamic_max_tokens is None or dynamic_max_tokens <= 0:
+        if dynamic_max_tokens is None or dynamic_max_tokens < minimum_output_tokens:
             # The exact preflight installed during plugin registration sees
             # this condition before Hermes builds the provider request and
             # starts compression.  Keep this middleware fail-open as a second
