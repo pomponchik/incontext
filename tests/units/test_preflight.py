@@ -287,6 +287,105 @@ def test_preflight_pressure_matches_the_viable_output_boundary(
     assert (result >= 64_000) is requires_compression
 
 
+@pytest.mark.parametrize("minimum_output_tokens", [1, 17, 99])
+@pytest.mark.parametrize("shortfall", [0, 1])
+def test_configured_output_reserve_drives_preflight_and_middleware_together(
+    monkeypatch: pytest.MonkeyPatch,
+    minimum_output_tokens: int,
+    shortfall: int,
+) -> None:
+    """Keep arbitrary configured reserves wired through both decision sites.
+
+    Pure arithmetic tests cannot detect one integration accidentally hardcoding
+    the default 4096-token reserve.  Exercise the smallest legal reserve, a
+    custom ordinary value, and the largest reserve below this test window.
+    """
+
+    window = 100
+    prompt_tokens = window - minimum_output_tokens + shortfall
+    configured = Settings(
+        model_name="qwen-test",
+        context_length=100,
+        compression_window=window,
+        fallback_margin_tokens=0,
+        min_output_tokens=minimum_output_tokens,
+        provider="",
+        base_url="",
+    )
+    counter = Counter(prompt_tokens)
+    active = DynamicOutputBudget(configured, counter)
+    _, turn_context = install_fake_hermes(
+        monkeypatch,
+        lambda messages, *, system_prompt="", tools=None: 1,
+    )
+    install(active)
+
+    pressure_result = turn_context.estimate_request_tokens_rough([])
+    budget_result = active(request={"model": "qwen-test", "messages": []})
+
+    assert pressure_result == window - 1 + shortfall
+    if shortfall:
+        assert budget_result is None
+    else:
+        assert budget_result is not None
+        assert budget_result["request"]["max_tokens"] == minimum_output_tokens
+
+
+@pytest.mark.parametrize(
+    ("minimum_output_tokens", "fallback_margin_tokens"),
+    [(1, 0), (17, 7), (80, 19)],
+)
+@pytest.mark.parametrize("shortfall", [0, 1])
+def test_fallback_preflight_and_middleware_share_the_exact_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    minimum_output_tokens: int,
+    fallback_margin_tokens: int,
+    shortfall: int,
+) -> None:
+    """Prove ``W - P - F == R`` is viable and one token less compresses."""
+
+    window = 100
+    rough_prompt_tokens = (
+        window - fallback_margin_tokens - minimum_output_tokens + shortfall
+    )
+
+    def rough(
+        messages: Any,
+        *,
+        system_prompt: str = "",
+        tools: Any = None,
+    ) -> int:
+        del messages, system_prompt, tools
+        return rough_prompt_tokens
+
+    configured = Settings(
+        model_name="qwen-test",
+        context_length=100,
+        compression_window=window,
+        fallback_margin_tokens=fallback_margin_tokens,
+        min_output_tokens=minimum_output_tokens,
+        provider="",
+        base_url="",
+    )
+    active = DynamicOutputBudget(
+        configured,
+        Counter(TimeoutError("exact tokenizer unavailable")),
+        rough_estimator=lambda request: rough_prompt_tokens,
+    )
+    _, turn_context = install_fake_hermes(monkeypatch, rough)
+    install(active)
+
+    pressure_result = turn_context.estimate_request_tokens_rough([])
+    budget_result = active(request={"model": "qwen-test", "messages": []})
+
+    assert pressure_result == window - 1 + shortfall
+    if shortfall:
+        assert budget_result is None
+    else:
+        assert budget_result is not None
+        assert budget_result["request"]["max_tokens"] == minimum_output_tokens
+
+
 def test_live_route_reader_supports_legacy_hermes_globals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

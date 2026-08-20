@@ -37,6 +37,17 @@ Answer the latest user message.
 """
 E2E_FINAL_RESPONSE = "Completed after automatic context compression"
 COMPRESSED_PROMPT_TOKENS = 10_000
+E2E_ATTEMPT_MARKER = "E2E bounded compression attempt"
+E2E_FIRST_SUMMARY_MARKER = "E2E first compression remains oversized"
+E2E_SECOND_SUMMARY_MARKER = "E2E second compression is viable"
+E2E_FIRST_SUMMARY_RESPONSE = E2E_SUMMARY_RESPONSE.replace(
+    E2E_SUMMARY_MARKER,
+    E2E_FIRST_SUMMARY_MARKER,
+)
+E2E_SECOND_SUMMARY_RESPONSE = E2E_SUMMARY_RESPONSE.replace(
+    E2E_SUMMARY_MARKER,
+    E2E_SECOND_SUMMARY_MARKER,
+)
 
 
 class TokenizerHandler(BaseHTTPRequestHandler):
@@ -47,6 +58,8 @@ class TokenizerHandler(BaseHTTPRequestHandler):
     requests: ClassVar[list[dict[str, Any]]] = []
     chat_requests: ClassVar[list[dict[str, Any]]] = []
     count_resolver: ClassVar[Any] = None
+    summary_responses: ClassVar[list[str]] = [E2E_SUMMARY_RESPONSE]
+    summary_error_status: ClassVar[int | None] = None
 
     def do_POST(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -69,9 +82,29 @@ class TokenizerHandler(BaseHTTPRequestHandler):
             return
         if path.endswith("/chat/completions"):
             self.chat_requests.append(payload)
-            serialized = json.dumps(payload.get("messages", [])).lower()
-            is_summary = "you are a summarization agent" in serialized
-            content = E2E_SUMMARY_RESPONSE if is_summary else E2E_FINAL_RESPONSE
+            is_summary = self._is_summary_request(payload)
+            if is_summary and self.summary_error_status is not None:
+                self._send_json(
+                    {
+                        "error": {
+                            "message": "synthetic summary failure",
+                            "type": "authentication_error",
+                            "code": "invalid_api_key",
+                        },
+                    },
+                    status=self.summary_error_status,
+                )
+                return
+            if is_summary:
+                summary_index = (
+                    sum(self._is_summary_request(item) for item in self.chat_requests)
+                    - 1
+                )
+                content = self.summary_responses[
+                    min(summary_index, len(self.summary_responses) - 1)
+                ]
+            else:
+                content = E2E_FINAL_RESPONSE
             if payload.get("stream") is True:
                 self._send_chat_stream(content)
                 return
@@ -146,9 +179,14 @@ class TokenizerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response)
 
-    def _send_json(self, payload: dict[str, Any]) -> None:
+    @staticmethod
+    def _is_summary_request(payload: dict[str, Any]) -> bool:
+        serialized = json.dumps(payload.get("messages", [])).lower()
+        return "you are a summarization agent" in serialized
+
+    def _send_json(self, payload: dict[str, Any], *, status: int = 200) -> None:
         response = json.dumps(payload).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(response)))
         self.end_headers()
@@ -164,6 +202,8 @@ def tokenizer_server() -> Iterator[str]:
     TokenizerHandler.chat_requests.clear()
     TokenizerHandler.count_resolver = None
     TokenizerHandler.prompt_tokens = 12_345
+    TokenizerHandler.summary_responses = [E2E_SUMMARY_RESPONSE]
+    TokenizerHandler.summary_error_status = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), TokenizerHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -171,6 +211,8 @@ def tokenizer_server() -> Iterator[str]:
         yield f"http://127.0.0.1:{server.server_port}/tokenize"
     finally:
         TokenizerHandler.count_resolver = None
+        TokenizerHandler.summary_responses = [E2E_SUMMARY_RESPONSE]
+        TokenizerHandler.summary_error_status = None
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
@@ -236,6 +278,105 @@ def assert_viable_output_boundary(
         TokenizerHandler.prompt_tokens = previous_prompt_tokens
 
 
+def make_history(*, pairs: int = 30, width: int = 1200) -> list[dict[str, Any]]:
+    """Build enough alternating turns for the real compressor to operate."""
+
+    history: list[dict[str, Any]] = []
+    for index in range(pairs):
+        history.extend(
+            [
+                {
+                    "role": "user",
+                    "content": f"Archived question {index}: " + "u" * width,
+                },
+                {
+                    "role": "assistant",
+                    "content": f"Archived answer {index}: " + "a" * width,
+                },
+            ],
+        )
+    return history
+
+
+def build_test_agent(
+    inference_base_url: str,
+) -> tuple[Any, list[tuple[str, str]]]:
+    """Construct a side-effect-free real Hermes agent for one scenario."""
+
+    status_messages: list[tuple[str, str]] = []
+    with patch(
+        "run_agent.get_tool_definitions",
+        return_value=[],
+    ), patch(
+        "run_agent.check_toolset_requirements",
+        return_value={},
+    ):
+        from run_agent import (  # type: ignore[import-not-found]  # noqa: PLC0415
+            AIAgent,
+        )
+
+        agent = AIAgent(
+            api_key="incontext-e2e-key",
+            base_url=inference_base_url,
+            provider="custom",
+            api_mode="chat_completions",
+            model="qwen-e2e",
+            max_iterations=2,
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            save_trajectories=False,
+        )
+
+    agent._cached_system_prompt = "You are the incontext e2e agent."
+    agent._use_prompt_caching = False
+    agent._disable_streaming = True
+    agent._compression_feasibility_checked = True
+    agent.tool_delay = 0
+    agent.status_callback = lambda event, message: status_messages.append(
+        (event, message),
+    )
+    return agent, status_messages
+
+
+def run_test_agent(
+    agent: Any,
+    prompt: str,
+    history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Run the real turn loop while suppressing unrelated persistence effects."""
+
+    with patch.object(
+        agent,
+        "_persist_session",
+    ), patch.object(
+        agent,
+        "_save_trajectory",
+    ), patch.object(
+        agent,
+        "_cleanup_task_resources",
+    ), patch.object(
+        agent,
+        "_build_system_prompt",
+        return_value="You are the incontext e2e agent.",
+    ):
+        return agent.run_conversation(
+            prompt,
+            conversation_history=history,
+        )
+
+
+def assert_no_tiny_output_cap(request: dict[str, Any], runtime: Any) -> None:
+    """Allow fail-open provider defaults, but reject zero or tiny sentinels."""
+
+    for field in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+        value = request.get(field)
+        if value is not None:
+            assert isinstance(value, int)
+            assert not isinstance(value, bool)
+            assert value >= runtime.settings.min_output_tokens
+
+
 def assert_complete_auto_compression(
     runtime: Any,
     inference_base_url: str,
@@ -257,76 +398,18 @@ def assert_complete_auto_compression(
             return COMPRESSED_PROMPT_TOKENS
         return oversized_prompt_tokens
 
-    history: list[dict[str, Any]] = []
-    for index in range(30):
-        history.extend(
-            [
-                {
-                    "role": "user",
-                    "content": f"Archived question {index}: " + "u" * 1200,
-                },
-                {
-                    "role": "assistant",
-                    "content": f"Archived answer {index}: " + "a" * 1200,
-                },
-            ],
-        )
+    history = make_history()
     original_turn_message_count = len(history) + 1
-    status_messages: list[tuple[str, str]] = []
 
     TokenizerHandler.count_resolver = resolve_count
     runtime.backend.clear_cache()
     try:
-        with patch(
-            "run_agent.get_tool_definitions",
-            return_value=[],
-        ), patch(
-            "run_agent.check_toolset_requirements",
-            return_value={},
-        ):
-            from run_agent import (  # type: ignore[import-not-found]  # noqa: PLC0415
-                AIAgent,
-            )
-
-            agent = AIAgent(
-                api_key="incontext-e2e-key",
-                base_url=inference_base_url,
-                provider="custom",
-                api_mode="chat_completions",
-                model="qwen-e2e",
-                max_iterations=2,
-                quiet_mode=True,
-                skip_context_files=True,
-                skip_memory=True,
-                save_trajectories=False,
-            )
-
-        agent._cached_system_prompt = "You are the incontext e2e agent."
-        agent._use_prompt_caching = False
-        agent._disable_streaming = True
-        agent._compression_feasibility_checked = True
-        agent.tool_delay = 0
-        agent.status_callback = lambda event, message: status_messages.append(
-            (event, message),
+        agent, status_messages = build_test_agent(inference_base_url)
+        result = run_test_agent(
+            agent,
+            "Answer only after compacting the prior history.",
+            history,
         )
-        with patch.object(
-            agent,
-            "_persist_session",
-        ), patch.object(
-            agent,
-            "_save_trajectory",
-        ), patch.object(
-            agent,
-            "_cleanup_task_resources",
-        ), patch.object(
-            agent,
-            "_build_system_prompt",
-            return_value="You are the incontext e2e agent.",
-        ):
-            result = agent.run_conversation(
-                "Answer only after compacting the prior history.",
-                conversation_history=history,
-            )
     finally:
         TokenizerHandler.count_resolver = None
         runtime.backend.clear_cache()
@@ -359,6 +442,270 @@ def assert_complete_auto_compression(
         runtime.settings.compression_window - COMPRESSED_PROMPT_TOKENS
     )
     assert main_requests[0]["max_tokens"] >= runtime.settings.min_output_tokens
+
+
+def assert_repeated_auto_compression(
+    runtime: Any,
+    inference_base_url: str,
+) -> None:
+    """Require a second real summary before allowing the main inference."""
+
+    TokenizerHandler.chat_requests.clear()
+    token_request_start = len(TokenizerHandler.requests)
+    chat_request_start = 0
+    initial_prompt_tokens = 100_000
+    first_summary_prompt_tokens = 70_000
+
+    def resolve_count(payload: dict[str, Any]) -> int:
+        serialized = json.dumps(payload.get("messages", [])).lower()
+        if E2E_SECOND_SUMMARY_MARKER.lower() in serialized:
+            return COMPRESSED_PROMPT_TOKENS
+        if E2E_FIRST_SUMMARY_MARKER.lower() in serialized:
+            return first_summary_prompt_tokens
+        if "you are a summarization agent" in serialized:
+            return COMPRESSED_PROMPT_TOKENS
+        return initial_prompt_tokens
+
+    TokenizerHandler.count_resolver = resolve_count
+    TokenizerHandler.summary_responses = [
+        E2E_FIRST_SUMMARY_RESPONSE,
+        E2E_SECOND_SUMMARY_RESPONSE,
+    ]
+    runtime.backend.clear_cache()
+    try:
+        agent, _ = build_test_agent(inference_base_url)
+        result = run_test_agent(
+            agent,
+            "Continue only after every required compression pass.",
+            make_history(pairs=80, width=4000),
+        )
+    finally:
+        TokenizerHandler.count_resolver = None
+        TokenizerHandler.summary_responses = [E2E_SUMMARY_RESPONSE]
+        runtime.backend.clear_cache()
+
+    assert result["completed"] is True
+    assert result["final_response"] == E2E_FINAL_RESPONSE
+    assert agent.context_compressor.compression_count >= 2
+
+    token_requests = TokenizerHandler.requests[token_request_start:]
+    assert any(E2E_FIRST_SUMMARY_MARKER in json.dumps(item) for item in token_requests)
+    assert any(E2E_SECOND_SUMMARY_MARKER in json.dumps(item) for item in token_requests)
+
+    chat_requests = TokenizerHandler.chat_requests[chat_request_start:]
+    summary_requests = [
+        item for item in chat_requests if TokenizerHandler._is_summary_request(item)
+    ]
+    main_requests = [item for item in chat_requests if item not in summary_requests]
+    assert len(summary_requests) == 2
+    assert len(main_requests) == 1
+    assert E2E_SECOND_SUMMARY_MARKER in json.dumps(main_requests[0]["messages"])
+    assert main_requests[0]["max_tokens"] == (
+        runtime.settings.compression_window - COMPRESSED_PROMPT_TOKENS
+    )
+
+
+def assert_no_progress_stops_compression(
+    runtime: Any,
+    inference_base_url: str,
+) -> None:
+    """Stop after one compressor no-op and never manufacture a tiny cap."""
+
+    TokenizerHandler.chat_requests.clear()
+    chat_request_start = 0
+    compression_calls = 0
+    oversized_prompt_tokens = (
+        runtime.settings.compression_window - runtime.settings.min_output_tokens + 1
+    )
+
+    def no_progress(
+        messages: list[dict[str, Any]],
+        system_message: Any,
+        **context: Any,
+    ) -> tuple[list[dict[str, Any]], str]:
+        nonlocal compression_calls
+        del system_message, context
+        compression_calls += 1
+        return messages, "You are the incontext e2e agent."
+
+    TokenizerHandler.count_resolver = lambda payload: oversized_prompt_tokens
+    runtime.backend.clear_cache()
+    history = make_history()
+    try:
+        agent, _ = build_test_agent(inference_base_url)
+        with patch.object(agent, "_compress_context", side_effect=no_progress):
+            result = run_test_agent(
+                agent,
+                "Continue after detecting that compression made no progress.",
+                history,
+            )
+    finally:
+        TokenizerHandler.count_resolver = None
+        runtime.backend.clear_cache()
+
+    assert result["completed"] is True
+    assert compression_calls == 1
+    assert len(result["messages"]) >= len(history) + 1
+    chat_requests = TokenizerHandler.chat_requests[chat_request_start:]
+    assert len(chat_requests) == 1
+    main_request = chat_requests[0]
+    assert not TokenizerHandler._is_summary_request(main_request)
+    assert_no_tiny_output_cap(main_request, runtime)
+
+
+def assert_compression_attempt_limit_is_bounded(
+    runtime: Any,
+    inference_base_url: str,
+) -> None:
+    """Exhaust multi-pass compression without looping or emitting zero tokens."""
+
+    TokenizerHandler.chat_requests.clear()
+    chat_request_start = 0
+    compression_calls = 0
+    attempt_prompt_tokens = {1: 150_000, 2: 100_000, 3: 70_000}
+
+    def resolve_count(payload: dict[str, Any]) -> int:
+        serialized = json.dumps(payload.get("messages", [])).lower()
+        for attempt in (3, 2, 1):
+            if f"{E2E_ATTEMPT_MARKER} {attempt}".lower() in serialized:
+                return attempt_prompt_tokens[attempt]
+        return 200_000
+
+    def bounded_progress(
+        messages: list[dict[str, Any]],
+        system_message: Any,
+        **context: Any,
+    ) -> tuple[list[dict[str, Any]], str]:
+        nonlocal compression_calls
+        del system_message, context
+        compression_calls += 1
+        rewritten = [dict(message) for message in messages]
+        if len(rewritten) > 2:
+            rewritten.pop(1)
+        content = str(rewritten[0].get("content") or "")
+        rewritten[0]["content"] = f"{content}\n{E2E_ATTEMPT_MARKER} {compression_calls}"
+        return rewritten, "You are the incontext e2e agent."
+
+    TokenizerHandler.count_resolver = resolve_count
+    runtime.backend.clear_cache()
+    try:
+        agent, _ = build_test_agent(inference_base_url)
+        agent.max_compression_attempts = 3
+        with patch.object(agent, "_compress_context", side_effect=bounded_progress):
+            result = run_test_agent(
+                agent,
+                "Continue after the bounded compression attempts are exhausted.",
+                make_history(),
+            )
+    finally:
+        TokenizerHandler.count_resolver = None
+        runtime.backend.clear_cache()
+
+    assert result["completed"] is True
+    assert compression_calls == 3
+    chat_requests = TokenizerHandler.chat_requests[chat_request_start:]
+    assert len(chat_requests) == 1
+    main_request = chat_requests[0]
+    assert f"{E2E_ATTEMPT_MARKER} 3" in json.dumps(main_request["messages"])
+    assert_no_tiny_output_cap(main_request, runtime)
+
+
+def assert_summary_error_is_bounded(
+    runtime: Any,
+    inference_base_url: str,
+) -> None:
+    """Preserve the turn when the real summary request is rejected."""
+
+    TokenizerHandler.chat_requests.clear()
+    chat_request_start = 0
+    oversized_prompt_tokens = (
+        runtime.settings.compression_window - runtime.settings.min_output_tokens + 1
+    )
+
+    def resolve_count(payload: dict[str, Any]) -> int:
+        serialized = json.dumps(payload.get("messages", [])).lower()
+        if "you are a summarization agent" in serialized:
+            return COMPRESSED_PROMPT_TOKENS
+        return oversized_prompt_tokens
+
+    TokenizerHandler.count_resolver = resolve_count
+    TokenizerHandler.summary_error_status = 401
+    runtime.backend.clear_cache()
+    history = make_history()
+    try:
+        agent, _ = build_test_agent(inference_base_url)
+        result = run_test_agent(
+            agent,
+            "Continue after handling a failed summary request.",
+            history,
+        )
+    finally:
+        TokenizerHandler.count_resolver = None
+        TokenizerHandler.summary_error_status = None
+        runtime.backend.clear_cache()
+
+    assert result["completed"] is True
+    assert result["final_response"] == E2E_FINAL_RESPONSE
+    assert agent.context_compressor.compression_count == 0
+    assert len(result["messages"]) >= len(history) + 1
+    assert "Archived question 0" in json.dumps(result["messages"])
+    assert "Archived answer 29" in json.dumps(result["messages"])
+    chat_requests = TokenizerHandler.chat_requests[chat_request_start:]
+    summary_requests = [
+        item for item in chat_requests if TokenizerHandler._is_summary_request(item)
+    ]
+    main_requests = [item for item in chat_requests if item not in summary_requests]
+    assert 1 <= len(summary_requests) <= 2
+    assert len(main_requests) == 1
+    assert_no_tiny_output_cap(main_requests[0], runtime)
+
+
+def assert_summary_timeout_is_bounded(
+    runtime: Any,
+    inference_base_url: str,
+) -> None:
+    """Bound a real compressor timeout without emitting an unusable cap."""
+
+    TokenizerHandler.chat_requests.clear()
+    oversized_prompt_tokens = (
+        runtime.settings.compression_window - runtime.settings.min_output_tokens + 1
+    )
+    TokenizerHandler.count_resolver = lambda payload: oversized_prompt_tokens
+    runtime.backend.clear_cache()
+    try:
+        agent, _ = build_test_agent(inference_base_url)
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=TimeoutError("synthetic summary timeout"),
+        ) as summary_call:
+            result = run_test_agent(
+                agent,
+                "Continue after handling a summary timeout.",
+                make_history(),
+            )
+    finally:
+        TokenizerHandler.count_resolver = None
+        runtime.backend.clear_cache()
+
+    assert result["completed"] is True
+    assert result["final_response"] == E2E_FINAL_RESPONSE
+    assert summary_call.call_count == 1
+    assert "timeout" in str(agent.context_compressor._last_summary_error).lower()
+    assert len(TokenizerHandler.chat_requests) == 1
+    main_request = TokenizerHandler.chat_requests[0]
+    assert not TokenizerHandler._is_summary_request(main_request)
+    assert_no_tiny_output_cap(main_request, runtime)
+
+
+def assert_compression_scenarios(runtime: Any, inference_base_url: str) -> None:
+    """Exercise successful, repeated, and bounded failure outcomes."""
+
+    assert_complete_auto_compression(runtime, inference_base_url)
+    assert_repeated_auto_compression(runtime, inference_base_url)
+    assert_no_progress_stops_compression(runtime, inference_base_url)
+    assert_compression_attempt_limit_is_bounded(runtime, inference_base_url)
+    assert_summary_error_is_bounded(runtime, inference_base_url)
+    assert_summary_timeout_is_bounded(runtime, inference_base_url)
 
 
 def test_pypi_entrypoint_runs_the_complete_hermes_compression_path(
@@ -500,6 +847,5 @@ def test_pypi_entrypoint_runs_the_complete_hermes_compression_path(
     # is invoked directly before that compression has happened.
     assert_viable_output_boundary(runtime, apply_llm_request_middleware)
 
-    # Finally drive a complete real Hermes turn: exact preflight, summary API,
-    # ContextCompressor assembly, post-compression budgeting, and main API.
-    assert_complete_auto_compression(runtime, inference_base_url)
+    # Drive the complete compression path plus every bounded recovery outcome.
+    assert_compression_scenarios(runtime, inference_base_url)

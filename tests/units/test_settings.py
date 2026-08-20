@@ -201,6 +201,43 @@ def test_load_settings_uses_configured_minimum_output_reserve() -> None:
     assert result.min_output_tokens == 3072
 
 
+def test_load_settings_accepts_the_last_viable_fallback_policy() -> None:
+    """Allow the equality edge that still leaves one token for the prompt."""
+
+    result = load(
+        environment={
+            "INCONTEXT_COMPRESSION_WINDOW_TOKENS": "5000",
+            "INCONTEXT_FALLBACK_MARGIN_TOKENS": "2000",
+            "INCONTEXT_MIN_OUTPUT_TOKENS": "2999",
+        },
+    )
+
+    assert result.compression_window == 5000
+    assert result.fallback_margin_tokens + result.min_output_tokens == 4999
+
+
+def test_load_settings_rejects_a_fallback_policy_with_no_viable_prompt() -> None:
+    """Reject individually valid reserves whose sum exhausts the window.
+
+    Hermes' rough estimator is normalized to at least one prompt token.  When
+    ``F + R >= W``, even that smallest prompt cannot retain ``R`` output tokens,
+    so fallback preflight would request compression forever without a viable
+    post-compression budget.
+    """
+
+    with pytest.raises(
+        settings.SettingsError,
+        match="fallback_margin_tokens plus min_output_tokens must be below",
+    ):
+        load(
+            environment={
+                "INCONTEXT_COMPRESSION_WINDOW_TOKENS": "5000",
+                "INCONTEXT_FALLBACK_MARGIN_TOKENS": "3000",
+                "INCONTEXT_MIN_OUTPUT_TOKENS": "3000",
+            },
+        )
+
+
 def test_normalized_model_thresholds_keeps_only_finite_numbers() -> None:
     assert settings._normalized_model_thresholds(
         {
