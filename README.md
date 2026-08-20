@@ -72,6 +72,10 @@ tokenization fails, both preflight and middleware use Hermes' rough estimate
 plus `F`, so they retain the same decision boundary. If both estimators fail,
 the original request is left unchanged.
 
+Startup rejects `F + R >= W`. Hermes normalizes a rough prompt estimate to at
+least one token, so that configuration could never leave `R` viable output
+tokens during a tokenizer outage, even after compressing everything else.
+
 This addresses the same output-budget arithmetic discussed in
 [NousResearch/hermes-agent#38652](https://github.com/NousResearch/hermes-agent/issues/38652).
 
