@@ -1,12 +1,18 @@
 <details>
   <summary>ⓘ</summary>
 
+[![Downloads](https://static.pepy.tech/badge/incontext/month)](https://pepy.tech/project/incontext)
+[![Downloads](https://static.pepy.tech/badge/incontext)](https://pepy.tech/project/incontext)
+[![Coverage Status](https://coveralls.io/repos/github/pomponchik/incontext/badge.svg?branch=develop)](https://coveralls.io/github/pomponchik/incontext?branch=develop)
+[![Lines of code](https://sloc.xyz/github/pomponchik/incontext/?category=code)](https://github.com/boyter/scc/)
+[![Hits-of-Code](https://hitsofcode.com/github/pomponchik/incontext?branch=develop)](https://hitsofcode.com/github/pomponchik/incontext/view?branch=develop)
 [![Tests](https://github.com/pomponchik/incontext/actions/workflows/tests_and_coverage.yml/badge.svg?branch=develop)](https://github.com/pomponchik/incontext/actions/workflows/tests_and_coverage.yml)
 [![Hermes e2e](https://github.com/pomponchik/incontext/actions/workflows/hermes_e2e.yml/badge.svg?branch=develop)](https://github.com/pomponchik/incontext/actions/workflows/hermes_e2e.yml)
 [![Python versions](https://img.shields.io/pypi/pyversions/incontext.svg)](https://pypi.org/project/incontext/)
 [![PyPI version](https://badge.fury.io/py/incontext.svg)](https://pypi.org/project/incontext/)
 [![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/pomponchik/incontext)
 
 </details>
 
