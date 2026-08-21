@@ -278,6 +278,48 @@ def assert_viable_output_boundary(
         TokenizerHandler.prompt_tokens = previous_prompt_tokens
 
 
+def assert_in_turn_tool_growth_uses_exact_pressure(
+    runtime: Any,
+    inference_base_url: str,
+) -> None:
+    """Exercise the real Hermes binding used after tool results enlarge a turn.
+
+    A turn can start below the compression boundary and cross it only after a
+    tool result is appended.  Hermes performs that second check through its
+    independently imported ``conversation_loop`` estimator, then applies a
+    defer heuristic intended only for rough counts.  The packaged plugin must
+    make that binding exact and prevent a recent-compaction marker from
+    suppressing the authoritative result before request middleware runs.
+    """
+
+    from agent import (  # noqa: PLC0415
+        conversation_loop,  # type: ignore[import-not-found]
+    )
+
+    previous_prompt_tokens = TokenizerHandler.prompt_tokens
+    previous_request_count = len(TokenizerHandler.requests)
+    oversized_prompt_tokens = (
+        runtime.settings.compression_window - runtime.settings.min_output_tokens + 1
+    )
+    try:
+        TokenizerHandler.prompt_tokens = oversized_prompt_tokens
+        runtime.backend.clear_cache()
+        pressure = conversation_loop.estimate_request_tokens_rough(  # type: ignore[attr-defined]
+            [{"role": "tool", "content": "A tool result enlarged this turn"}],
+            tools=[{"type": "function"}],
+        )
+        agent, _ = build_test_agent(inference_base_url)
+        compressor = agent.context_compressor
+        compressor.awaiting_real_usage_after_compression = True
+
+        assert pressure == runtime.settings.compression_window
+        assert compressor.should_defer_preflight_to_real_usage(pressure) is False
+        assert len(TokenizerHandler.requests) == previous_request_count + 1
+    finally:
+        TokenizerHandler.prompt_tokens = previous_prompt_tokens
+        runtime.backend.clear_cache()
+
+
 def make_history(*, pairs: int = 30, width: int = 1200) -> list[dict[str, Any]]:
     """Build enough alternating turns for the real compressor to operate."""
 
@@ -509,7 +551,13 @@ def assert_no_progress_stops_compression(
     runtime: Any,
     inference_base_url: str,
 ) -> None:
-    """Stop after one compressor no-op and never manufacture a tiny cap."""
+    """Bound compressor no-ops and never manufacture a tiny output cap.
+
+    Hermes 0.18 performs one turn-start attempt plus up to three in-turn
+    attempts, while newer releases stop after the first no-progress result.
+    Both behaviours are safe only when they remain bounded and do not replace
+    the viable-output reserve with a tiny sentinel.
+    """
 
     TokenizerHandler.chat_requests.clear()
     chat_request_start = 0
@@ -544,7 +592,7 @@ def assert_no_progress_stops_compression(
         runtime.backend.clear_cache()
 
     assert result["completed"] is True
-    assert compression_calls == 1
+    assert 1 <= compression_calls <= 4
     assert len(result["messages"]) >= len(history) + 1
     chat_requests = TokenizerHandler.chat_requests[chat_request_start:]
     assert len(chat_requests) == 1
@@ -557,7 +605,13 @@ def assert_compression_attempt_limit_is_bounded(
     runtime: Any,
     inference_base_url: str,
 ) -> None:
-    """Exhaust multi-pass compression without looping or emitting zero tokens."""
+    """Exhaust version-specific compression guards without an unbounded loop.
+
+    Hermes 0.18 keeps separate three-attempt guards at turn start and inside
+    the request loop; newer releases share or stop the sequence after three.
+    Exact pressure may activate both older guards, but must never bypass their
+    combined upper bound or emit a zero-token completion sentinel afterwards.
+    """
 
     TokenizerHandler.chat_requests.clear()
     chat_request_start = 0
@@ -602,7 +656,7 @@ def assert_compression_attempt_limit_is_bounded(
         runtime.backend.clear_cache()
 
     assert result["completed"] is True
-    assert compression_calls == 3
+    assert 3 <= compression_calls <= 6
     chat_requests = TokenizerHandler.chat_requests[chat_request_start:]
     assert len(chat_requests) == 1
     main_request = chat_requests[0]
@@ -846,6 +900,9 @@ def test_pypi_entrypoint_runs_the_complete_hermes_compression_path(
     # sees pressure exactly at its threshold, while middleware fails open if it
     # is invoked directly before that compression has happened.
     assert_viable_output_boundary(runtime, apply_llm_request_middleware)
+
+    # The same exact decision must remain active after tools grow a live turn.
+    assert_in_turn_tool_growth_uses_exact_pressure(runtime, inference_base_url)
 
     # Drive the complete compression path plus every bounded recovery outcome.
     assert_compression_scenarios(runtime, inference_base_url)

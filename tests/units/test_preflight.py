@@ -77,12 +77,15 @@ def install_fake_hermes(
 def test_install_replaces_rough_preflight_with_exact_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Patch proactive compression and count the complete provider prompt.
+    """Patch both proactive checks and count the complete provider prompt.
 
-    ``turn_context`` owns the primary-route compression gate.  Later recovery
-    paths may already have switched to a fallback route, so their imported
-    estimator must remain untouched rather than use the primary tokenizer.
-    The proactive wrapper still includes the separately supplied system prompt.
+    Hermes checks once at turn start and again before every model call because
+    tool results can make a previously small turn exceed the context boundary.
+    Both modules import the estimator into independent local bindings, so
+    leaving the in-turn binding rough lets an oversized request reach request
+    middleware after the final opportunity to compress.  The exact wrapper
+    must cover both bindings and still include the separately supplied system
+    prompt and tools.
     """
 
     def rough(
@@ -98,22 +101,121 @@ def test_install_replaces_rough_preflight_with_exact_backend(
     cleanup = install(runtime(counter))
 
     assert callable(cleanup)
-    assert loop.estimate_request_tokens_rough is rough
-    assert turn_context.estimate_request_tokens_rough(
-        [{"role": "user", "content": "large"}],
-        system_prompt="Follow the policy",
+    expected_request = {
+        "model": "qwen-test",
+        "messages": [
+            {"role": "system", "content": "Follow the policy"},
+            {"role": "user", "content": "large"},
+        ],
+        "tools": [{"type": "function"}],
+    }
+    for module in (turn_context, loop):
+        assert module.estimate_request_tokens_rough(
+            [{"role": "user", "content": "large"}],
+            system_prompt="Follow the policy",
+            tools=[{"type": "function"}],
+        ) == pressure(64_000)
+    assert counter.requests == [expected_request, expected_request]
+
+
+def test_in_turn_exact_pressure_is_never_deferred_as_a_noisy_rough_estimate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compress tool-loop growth even after Hermes recently compacted history.
+
+    Hermes may defer a high *rough* estimate immediately after compression so
+    repeated schema over-counting does not cause a compaction loop.  An exact
+    tokenizer result is authoritative and must bypass that heuristic: deferring
+    it sends the request to middleware too late to compress, where incontext
+    fails open and Hermes' full-window provider default survives on the wire.
+    Ordinary rough values must retain Hermes' original defer behaviour.
+    """
+
+    class ContextCompressor:
+        def should_defer_preflight_to_real_usage(self, tokens: int) -> bool:
+            return tokens >= 64_000
+
+    compressor_module = types.ModuleType("agent.context_compressor")
+    compressor_module.ContextCompressor = ContextCompressor  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent.context_compressor", compressor_module)
+    loop, _ = install_fake_hermes(
+        monkeypatch,
+        lambda messages, *, system_prompt="", tools=None: 30_508,
+    )
+    first_cleanup = install(runtime(Counter(61_052)))
+    second_cleanup = install(runtime(Counter(61_052)))
+    assert callable(first_cleanup)
+    assert callable(second_cleanup)
+    assert callable(ContextCompressor.should_defer_preflight_to_real_usage)
+
+    exact_pressure = loop.estimate_request_tokens_rough(
+        [{"role": "tool", "content": "large result"}],
         tools=[{"type": "function"}],
-    ) == pressure(64_000)
-    assert counter.requests == [
-        {
-            "model": "qwen-test",
-            "messages": [
-                {"role": "system", "content": "Follow the policy"},
-                {"role": "user", "content": "large"},
-            ],
-            "tools": [{"type": "function"}],
-        },
-    ]
+    )
+    compressor = ContextCompressor()
+
+    assert exact_pressure == pressure(61_052)
+    assert compressor.should_defer_preflight_to_real_usage(exact_pressure) is False
+    assert compressor.should_defer_preflight_to_real_usage(64_000) is True
+
+    first_cleanup()
+    assert compressor.should_defer_preflight_to_real_usage(exact_pressure) is False
+    second_cleanup()
+    assert compressor.should_defer_preflight_to_real_usage(exact_pressure) is True
+
+
+@pytest.mark.parametrize("loop_api", [None, "renamed-private-api"])
+def test_install_keeps_turn_preflight_when_in_turn_hook_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    loop_api: str | None,
+) -> None:
+    """Remain compatible with Hermes releases lacking the newer loop hook.
+
+    The in-turn pressure check was added after the original turn-prologue
+    preflight.  Older Hermes releases may omit its module, while a future one
+    may temporarily expose no callable under the private binding.  Neither API
+    shape should disable exact compression at the still-supported turn start.
+    """
+
+    _, turn_context = install_fake_hermes(
+        monkeypatch,
+        lambda messages, *, system_prompt="", tools=None: 7,
+    )
+    if loop_api is None:
+        monkeypatch.delitem(sys.modules, "agent.conversation_loop")
+    else:
+        sys.modules["agent.conversation_loop"].estimate_request_tokens_rough = loop_api  # type: ignore[attr-defined]
+
+    cleanup = install(runtime(Counter(123)))
+
+    assert callable(cleanup)
+    assert turn_context.estimate_request_tokens_rough([]) == pressure(123)
+
+
+def test_install_tolerates_hermes_without_the_rough_defer_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not require a version-specific optimization to install preflight.
+
+    Hermes versions predating the noisy-rough-estimate heuristic have nothing
+    to bypass.  Absence of its compressor method must leave both exact pressure
+    bindings active instead of turning a compatibility optimization into a
+    mandatory private API dependency.
+    """
+
+    compressor_module = types.ModuleType("agent.context_compressor")
+    compressor_module.ContextCompressor = None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent.context_compressor", compressor_module)
+    loop, turn_context = install_fake_hermes(
+        monkeypatch,
+        lambda messages, *, system_prompt="", tools=None: 7,
+    )
+
+    cleanup = install(runtime(Counter(123)))
+
+    assert callable(cleanup)
+    assert loop.estimate_request_tokens_rough([]) == pressure(123)
+    assert turn_context.estimate_request_tokens_rough([]) == pressure(123)
 
 
 def test_install_patches_the_turn_context_binding_used_for_compression(
