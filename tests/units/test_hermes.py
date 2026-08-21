@@ -4,6 +4,7 @@ import builtins
 import sys
 import threading
 import types
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -29,7 +30,7 @@ class Context:
 
 
 @pytest.fixture(autouse=True)
-def reset_runtime() -> None:
+def reset_runtime() -> Iterator[None]:
     hermes._reset_runtime_for_tests()
     yield
     hermes._reset_runtime_for_tests()
@@ -83,7 +84,6 @@ def test_get_runtime_isolated_by_active_hermes_home() -> None:
     Returning to profile A must reuse A's backend, while profile B receives a
     separately constructed settings/backend pair instead of inheriting A.
     """
-
     first = mock.create_autospec(DynamicOutputBudget, instance=True)
     second = mock.create_autospec(DynamicOutputBudget, instance=True)
     keys = iter(["profile-a", "profile-b", "profile-a"])
@@ -107,7 +107,6 @@ def test_active_runtime_is_scoped_to_registered_profiles() -> None:
     B instead of lazily creating B's runtime and sending its prompt to A's
     configured tokenizer endpoint.
     """
-
     runtime = mock.create_autospec(DynamicOutputBudget, instance=True)
     with mock.patch.object(
         hermes,
@@ -126,7 +125,6 @@ def test_active_runtime_builds_after_profile_activation() -> None:
     the profile remains registered.  The next wrapped call must rebuild only
     that active profile instead of treating it as disabled.
     """
-
     runtime = mock.create_autospec(DynamicOutputBudget, instance=True)
     with mock.patch.object(
         hermes,
@@ -145,7 +143,6 @@ def test_profile_runtime_survives_until_its_last_owner_unloads() -> None:
     unload from either manager must decrement ownership without invalidating a
     runtime that the remaining manager and its in-flight requests still use.
     """
-
     runtime = mock.create_autospec(DynamicOutputBudget, instance=True)
     hermes._runtimes["profile-a"] = runtime
     hermes._activate_profile("profile-a")
@@ -169,7 +166,6 @@ def test_concurrent_registration_retains_its_validated_runtime(
     rebuild and may fail.  Runtime acquisition and owner increment must share
     one critical section, leaving no observable owner-without-runtime state.
     """
-
     runtime = mock.Mock()
     runtime.settings = runtime_settings
     first_context = Context()
@@ -244,7 +240,6 @@ def test_profile_runtime_acquisition_closes_the_final_unload_gap(
     section and proves the new owner is visible before unload can invalidate
     the runtime.
     """
-
     runtime = mock.Mock()
     runtime.settings = runtime_settings
     real_lock = threading.Lock()
@@ -304,7 +299,6 @@ def test_profile_runtime_builder_can_query_active_runtime_without_deadlock(
     code blocks forever.  The finished runtime and owner must still become
     visible together after construction.
     """
-
     runtime = mock.Mock()
     runtime.settings = runtime_settings
     context = Context()
@@ -349,7 +343,6 @@ def test_concurrent_runtime_publication_keeps_the_existing_winner() -> None:
     lock and retain the first published object rather than overwrite the
     runtime already used by another request or profile owner.
     """
-
     candidate = mock.create_autospec(DynamicOutputBudget, instance=True)
     winner = mock.create_autospec(DynamicOutputBudget, instance=True)
 
@@ -381,7 +374,6 @@ def test_active_runtime_discards_candidate_if_owner_unloads_during_build() -> No
     recheck ownership and discard the candidate when cleanup wins; otherwise a
     removed profile's old settings are cached for the next forced discovery.
     """
-
     candidate = mock.create_autospec(DynamicOutputBudget, instance=True)
     hermes._active_profiles["profile-a"] = 1
 
@@ -405,7 +397,6 @@ def _capture_registration_failure(
     failures: list[BaseException],
 ) -> None:
     """Record an unexpected thread exception for deterministic assertions."""
-
     try:
         callback(context)
     except BaseException as exc:  # noqa: BLE001
@@ -421,7 +412,6 @@ def test_profile_cleanup_is_concurrently_idempotent() -> None:
     the runtime owned by another manager.  A per-callback lock must preserve
     that independent owner under a synchronized burst of duplicate calls.
     """
-
     runtime = mock.create_autospec(DynamicOutputBudget, instance=True)
     hermes._runtimes["profile-a"] = runtime
     cleanup = hermes._activate_profile("profile-a")
@@ -450,7 +440,6 @@ def test_profile_unload_invalidates_its_cached_runtime() -> None:
     Once all owners have unloaded, retaining the previous cached runtime would
     silently preserve the old context window and tokenizer route on reload.
     """
-
     first = mock.create_autospec(DynamicOutputBudget, instance=True)
     second = mock.create_autospec(DynamicOutputBudget, instance=True)
     first.settings = mock.Mock(context_length=65_536, compression_window=64_000)
@@ -497,7 +486,6 @@ def test_runtime_key_uses_context_aware_hermes_home(
     enters another home.  Importing ``get_hermes_home`` lazily and resolving its
     path mirrors Hermes' own profile-scoped PluginManager cache.
     """
-
     constants = types.ModuleType("hermes_constants")
     constants.get_hermes_home = lambda: tmp_path / "nested" / ".."  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "hermes_constants", constants)
@@ -514,7 +502,6 @@ def test_runtime_key_falls_back_without_hermes_installation(
     Hermes environment.  Failure to import ``hermes_constants`` must map to the
     single default runtime key instead of making ``get_runtime`` unimportable.
     """
-
     original_import = builtins.__import__
 
     def rejecting_import(name: str, *args: Any, **kwargs: Any) -> Any:
@@ -574,7 +561,6 @@ def test_stale_middleware_during_unload_does_not_resurrect_runtime(
     runtime; otherwise force rediscovery reuses settings constructed during
     unload rather than loading the profile's new configuration.
     """
-
     first = mock.Mock()
     first.settings = runtime_settings
     fresh = mock.Mock()
@@ -746,7 +732,6 @@ def test_failed_legacy_force_reload_releases_immortal_installation(
     forever.  All original acquisitions must therefore be released in reverse
     order and the cached runtime invalidated.
     """
-
     events: list[str] = []
 
     class LegacyContext:
@@ -798,7 +783,6 @@ def test_register_skips_missing_cleanup_callbacks(
     Their installers return ``None``; the public middleware should still load
     without handing invalid callbacks to the ownership ledger.
     """
-
     runtime = mock.Mock()
     runtime.settings = runtime_settings
     context = Context()
@@ -831,7 +815,6 @@ def test_register_rolls_back_when_auxiliary_installation_fails(
     Hermes never receives unload callbacks for a plugin whose registration
     failed.
     """
-
     runtime = mock.Mock()
     runtime.settings = runtime_settings
     preflight_cleanup = mock.Mock()
@@ -872,7 +855,6 @@ def test_register_rolls_back_all_integrations_when_middleware_rejects(
     acquisition order and remain independent of the absent unload ledger so no
     process-wide patch continues handling requests for a disabled profile.
     """
-
     events: list[str] = []
 
     class RejectingContext(Context):

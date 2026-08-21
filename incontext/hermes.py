@@ -22,7 +22,6 @@ _legacy_cleanups: Dict[str, Tuple[Callable[[], None], ...]] = {}
 
 def build_runtime() -> DynamicOutputBudget:
     """Construct a fully validated runtime."""
-
     environment = Environment()
     settings = load_settings(environment=environment)
     backend = backends[environment.backend].one()
@@ -31,7 +30,6 @@ def build_runtime() -> DynamicOutputBudget:
 
 def get_runtime() -> DynamicOutputBudget:
     """Return the runtime scoped to the active Hermes profile/home."""
-
     key = _runtime_key()
     with _runtime_lock:
         runtime = _runtimes.get(key)
@@ -48,7 +46,6 @@ def get_runtime() -> DynamicOutputBudget:
 
 def _profile_cleanup(key: str) -> Callable[[], None]:
     """Create an idempotent callback for one already-acquired profile owner."""
-
     closed = False
     cleanup_lock = threading.Lock()
 
@@ -67,7 +64,6 @@ def _acquire_profile_runtime(
     key: str,
 ) -> Tuple[DynamicOutputBudget, Callable[[], None]]:
     """Acquire a validated runtime and its profile owner atomically."""
-
     with _runtime_lock:
         runtime = _runtimes.get(key)
         if runtime is not None:
@@ -85,7 +81,6 @@ def _acquire_profile_runtime(
 
 def get_active_runtime() -> Optional[DynamicOutputBudget]:
     """Return a runtime only where an active profile loaded the plugin."""
-
     key = _runtime_key()
     with _runtime_lock:
         if _active_profiles.get(key, 0) == 0:
@@ -106,7 +101,6 @@ def get_active_runtime() -> Optional[DynamicOutputBudget]:
 
 def _activate_profile(key: str) -> Callable[[], None]:
     """Record one profile owner and return its idempotent release callback."""
-
     with _runtime_lock:
         _active_profiles[key] = _active_profiles.get(key, 0) + 1
     return _profile_cleanup(key)
@@ -114,7 +108,6 @@ def _activate_profile(key: str) -> Callable[[], None]:
 
 def _deactivate_profile(key: str) -> None:
     """Release a profile owner and invalidate its runtime after the last one."""
-
     with _runtime_lock:
         owners = _active_profiles.get(key, 0)
         if owners <= 1:
@@ -126,7 +119,6 @@ def _deactivate_profile(key: str) -> None:
 
 def _runtime_key() -> str:
     """Resolve Hermes' ContextVar-aware home without making it a dependency."""
-
     try:
         from hermes_constants import (  # type: ignore[import-not-found]  # noqa: PLC0415
             get_hermes_home,
@@ -145,7 +137,6 @@ def apply_incontext(
     **context: Any,
 ) -> Optional[Dict[str, Any]]:
     """Stable function entry point used by Hermes middleware."""
-
     runtime = get_active_runtime()
     if runtime is None:
         return None
@@ -154,7 +145,6 @@ def apply_incontext(
 
 def register(ctx: Any) -> None:
     """Register the plugin with a Hermes ``PluginContext``."""
-
     key = _runtime_key()
     on_unload = getattr(ctx, "on_unload", None)
     with _registration_lock:

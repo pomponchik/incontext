@@ -220,7 +220,6 @@ def tokenizer_server() -> Iterator[str]:
 
 def write_hermes_config(home: Path, inference_base_url: str) -> None:
     """Write the smallest real config that resolves all plugin invariants."""
-
     home.mkdir(parents=True)
     (home / "empty-bundled-plugins").mkdir()
     (home / "config.yaml").write_text(
@@ -248,7 +247,6 @@ def assert_viable_output_boundary(
     apply_middleware: Any,
 ) -> None:
     """Exercise the exact reserve boundary through real Hermes bindings."""
-
     from agent import turn_context  # type: ignore[import-not-found]  # noqa: PLC0415
 
     previous_prompt_tokens = TokenizerHandler.prompt_tokens
@@ -291,7 +289,6 @@ def assert_in_turn_tool_growth_uses_exact_pressure(
     make that binding exact and prevent a recent-compaction marker from
     suppressing the authoritative result before request middleware runs.
     """
-
     from agent import (  # noqa: PLC0415
         conversation_loop,  # type: ignore[import-not-found]
     )
@@ -322,7 +319,6 @@ def assert_in_turn_tool_growth_uses_exact_pressure(
 
 def make_history(*, pairs: int = 30, width: int = 1200) -> list[dict[str, Any]]:
     """Build enough alternating turns for the real compressor to operate."""
-
     history: list[dict[str, Any]] = []
     for index in range(pairs):
         history.extend(
@@ -344,7 +340,6 @@ def build_test_agent(
     inference_base_url: str,
 ) -> tuple[Any, list[tuple[str, str]]]:
     """Construct a side-effect-free real Hermes agent for one scenario."""
-
     status_messages: list[tuple[str, str]] = []
     with patch(
         "run_agent.get_tool_definitions",
@@ -387,7 +382,6 @@ def run_test_agent(
     history: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Run the real turn loop while suppressing unrelated persistence effects."""
-
     with patch.object(
         agent,
         "_persist_session",
@@ -410,7 +404,6 @@ def run_test_agent(
 
 def assert_no_tiny_output_cap(request: dict[str, Any], runtime: Any) -> None:
     """Allow fail-open provider defaults, but reject zero or tiny sentinels."""
-
     for field in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
         value = request.get(field)
         if value is not None:
@@ -424,7 +417,6 @@ def assert_complete_auto_compression(
     inference_base_url: str,
 ) -> None:
     """Run an oversized turn through real Hermes compression and inference."""
-
     token_request_start = len(TokenizerHandler.requests)
     chat_request_start = len(TokenizerHandler.chat_requests)
     oversized_prompt_tokens = (
@@ -491,7 +483,6 @@ def assert_repeated_auto_compression(
     inference_base_url: str,
 ) -> None:
     """Require a second real summary before allowing the main inference."""
-
     TokenizerHandler.chat_requests.clear()
     token_request_start = len(TokenizerHandler.requests)
     chat_request_start = 0
@@ -558,7 +549,6 @@ def assert_no_progress_stops_compression(
     Both behaviours are safe only when they remain bounded and do not replace
     the viable-output reserve with a tiny sentinel.
     """
-
     TokenizerHandler.chat_requests.clear()
     chat_request_start = 0
     compression_calls = 0
@@ -576,7 +566,7 @@ def assert_no_progress_stops_compression(
         compression_calls += 1
         return messages, "You are the incontext e2e agent."
 
-    TokenizerHandler.count_resolver = lambda payload: oversized_prompt_tokens
+    TokenizerHandler.count_resolver = lambda _payload: oversized_prompt_tokens
     runtime.backend.clear_cache()
     history = make_history()
     try:
@@ -612,7 +602,6 @@ def assert_compression_attempt_limit_is_bounded(
     Exact pressure may activate both older guards, but must never bypass their
     combined upper bound or emit a zero-token completion sentinel afterwards.
     """
-
     TokenizerHandler.chat_requests.clear()
     chat_request_start = 0
     compression_calls = 0
@@ -669,7 +658,6 @@ def assert_summary_error_is_bounded(
     inference_base_url: str,
 ) -> None:
     """Preserve the turn when the real summary request is rejected."""
-
     TokenizerHandler.chat_requests.clear()
     chat_request_start = 0
     oversized_prompt_tokens = (
@@ -719,12 +707,11 @@ def assert_summary_timeout_is_bounded(
     inference_base_url: str,
 ) -> None:
     """Bound a real compressor timeout without emitting an unusable cap."""
-
     TokenizerHandler.chat_requests.clear()
     oversized_prompt_tokens = (
         runtime.settings.compression_window - runtime.settings.min_output_tokens + 1
     )
-    TokenizerHandler.count_resolver = lambda payload: oversized_prompt_tokens
+    TokenizerHandler.count_resolver = lambda _payload: oversized_prompt_tokens
     runtime.backend.clear_cache()
     try:
         agent, _ = build_test_agent(inference_base_url)
@@ -753,7 +740,6 @@ def assert_summary_timeout_is_bounded(
 
 def assert_compression_scenarios(runtime: Any, inference_base_url: str) -> None:
     """Exercise successful, repeated, and bounded failure outcomes."""
-
     assert_complete_auto_compression(runtime, inference_base_url)
     assert_repeated_auto_compression(runtime, inference_base_url)
     assert_no_progress_stops_compression(runtime, inference_base_url)
@@ -768,7 +754,6 @@ def test_pypi_entrypoint_runs_the_complete_hermes_compression_path(
     tokenizer_server: str,
 ) -> None:
     """Load through metadata, register, and execute through Hermes itself."""
-
     home = tmp_path / "hermes"
     inference_base_url = tokenizer_server.rsplit("/", 1)[0] + "/v1"
     write_hermes_config(home, inference_base_url)

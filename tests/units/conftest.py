@@ -9,7 +9,6 @@ from incontext.vllm import VllmEnvironment
 @pytest.fixture(autouse=True)
 def reset_skelet_environment_caches() -> None:
     """Keep skelet's process-environment cache isolated between unit tests."""
-
     for storage in (Environment, HermesEnvironment, VllmEnvironment):
         for source in storage.__sources__.sources:
             source.__dict__.pop("data", None)

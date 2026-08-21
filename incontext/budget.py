@@ -15,7 +15,6 @@ OUTPUT_BUDGET_FIELDS = ("max_tokens", "max_completion_tokens", "max_output_token
 
 def _backend_source(backend: Backend) -> str:
     """Read optional diagnostics without letting them break middleware."""
-
     try:
         return backend.source
     except Exception as backend_error:  # noqa: BLE001
@@ -28,7 +27,6 @@ def _backend_source(backend: Backend) -> str:
 
 def _materialize_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Copy reusable OpenAI collections into their provider-visible shapes."""
-
     messages = request.get("messages")
     if not isinstance(messages, Collection) or isinstance(
         messages,
@@ -64,7 +62,6 @@ def compute_max_tokens(
     request while retaining ``1`` as the default for callers of this helper
     that only need its original positive-space contract.
     """
-
     if compression_window <= 0:
         raise ValueError("compression_window must be positive")
     if prompt_tokens < 0:
@@ -82,7 +79,6 @@ def compression_pressure_tokens(
     minimum_output_tokens: int,
 ) -> int:
     """Include the viability reserve in Hermes' preflight pressure count."""
-
     if prompt_tokens < 0:
         raise ValueError("prompt_tokens must not be negative")
     if minimum_output_tokens <= 0:
@@ -98,7 +94,6 @@ def _requested_output_cap(
     coerce: Callable[[Any], Optional[int]],
 ) -> Optional[Tuple[str, int]]:
     """Return the provider field and smallest valid caller cap."""
-
     extra_body = request.get("extra_body")
     top_level_caps = [
         (field, value)
@@ -123,7 +118,6 @@ def _requested_output_cap(
 
 def estimate_request_tokens_rough(request: Dict[str, Any]) -> int:
     """Use Hermes' own conservative request estimator as a fallback."""
-
     # Hermes is intentionally an optional runtime dependency of the PyPI package.
     from agent.model_metadata import (  # type: ignore[import-not-found]  # noqa: PLC0415
         estimate_request_tokens_rough as estimator,
@@ -174,7 +168,6 @@ class DynamicOutputBudget:
         **context: Any,
     ) -> Optional[Dict[str, Any]]:
         """Rewrite output-cap aliases into one exact dynamic ``max_tokens``."""
-
         if not isinstance(request, dict):
             return None
         prepared_request = _materialize_request(request)
@@ -261,7 +254,6 @@ class DynamicOutputBudget:
         source: str,
     ) -> Optional[Tuple[str, int]]:
         """Combine the window, caller cap, and backend wire constraint."""
-
         try:
             requested_output_cap = _requested_output_cap(
                 request,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, get_type_hints
+from typing import Any, cast, get_type_hints
 from unittest.mock import patch
 
 import pytest
@@ -25,6 +25,7 @@ class ReplacementBackend(Backend):
         *,
         context_length: int,
     ) -> int:
+        del request
         return context_length
 
     def clear_cache(self) -> None:
@@ -33,7 +34,6 @@ class ReplacementBackend(Backend):
 
 def test_backend_contract_is_public_and_abstract() -> None:
     """Expose the extension contract at the documented package boundary."""
-
     assert incontext.Backend is Backend
     assert incontext.backends is backends
     with pytest.raises(TypeError):
@@ -47,7 +47,6 @@ def test_backend_preserves_output_budget_alias_by_default() -> None:
     fields remain untouched unless a backend explicitly documents a wire-level
     incompatibility such as vLLM Chat Completions' ignored Responses alias.
     """
-
     assert ReplacementBackend().output_budget_field("max_output_tokens") == (
         "max_output_tokens"
     )
@@ -61,7 +60,6 @@ def test_backend_adds_no_provider_output_limit_by_default() -> None:
     default extension must therefore leave their dynamic budget untouched
     until a backend explicitly reports an additional limit.
     """
-
     assert (
         ReplacementBackend().output_budget_limit(
             {"model": "replacement", "messages": []},
@@ -80,9 +78,8 @@ def test_public_type_hints_resolve_on_every_supported_python() -> None:
     callable must resolve at runtime on each interpreter declared in package
     metadata, not merely parse successfully there.
     """
-
     targets = (
-        Backend.source.fget,
+        cast(property, Backend.__dict__["source"]).fget,
         Backend.count,
         Backend.clear_cache,
         Backend.output_budget_field,
@@ -94,7 +91,7 @@ def test_public_type_hints_resolve_on_every_supported_python() -> None:
         apply_incontext,
         register,
         VllmBackend.__init__,
-        VllmBackend.source.fget,
+        cast(property, VllmBackend.__dict__["source"]).fget,
         VllmBackend.count,
         VllmBackend.clear_cache,
         VllmBackend.output_budget_field,
@@ -129,7 +126,6 @@ def test_named_backend_can_replace_the_bundled_backend() -> None:
     uniqueness policy.  A second distribution using the same selected name
     must fail during discovery instead of making startup order-dependent.
     """
-
     expected = ReplacementBackend()
 
     @backends.plugin("unit_replacement")

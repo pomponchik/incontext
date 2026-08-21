@@ -66,7 +66,7 @@ def install_fake_hermes(
     loop.estimate_request_tokens_rough = original  # type: ignore[attr-defined]
     turn_context.estimate_request_tokens_rough = original  # type: ignore[attr-defined]
     turn_context._should_run_preflight_estimate = (  # type: ignore[attr-defined]
-        lambda messages, protect_first_n, protect_last_n, threshold_tokens: False
+        lambda messages, protect_first_n, protect_last_n, threshold_tokens: False  # noqa: ARG005
     )
     monkeypatch.setitem(sys.modules, "agent", agent)
     monkeypatch.setitem(sys.modules, "agent.conversation_loop", loop)
@@ -94,6 +94,7 @@ def test_install_replaces_rough_preflight_with_exact_backend(
         system_prompt: str = "",
         tools: Any = None,
     ) -> int:
+        del messages, system_prompt, tools
         raise AssertionError("exact backend should be used")
 
     loop, turn_context = install_fake_hermes(monkeypatch, rough)
@@ -140,7 +141,7 @@ def test_in_turn_exact_pressure_is_never_deferred_as_a_noisy_rough_estimate(
     monkeypatch.setitem(sys.modules, "agent.context_compressor", compressor_module)
     loop, _ = install_fake_hermes(
         monkeypatch,
-        lambda messages, *, system_prompt="", tools=None: 30_508,
+        lambda messages, *, system_prompt="", tools=None: 30_508,  # noqa: ARG005
     )
     first_cleanup = install(runtime(Counter(61_052)))
     second_cleanup = install(runtime(Counter(61_052)))
@@ -176,10 +177,9 @@ def test_install_keeps_turn_preflight_when_in_turn_hook_is_unavailable(
     may temporarily expose no callable under the private binding.  Neither API
     shape should disable exact compression at the still-supported turn start.
     """
-
     _, turn_context = install_fake_hermes(
         monkeypatch,
-        lambda messages, *, system_prompt="", tools=None: 7,
+        lambda messages, *, system_prompt="", tools=None: 7,  # noqa: ARG005
     )
     if loop_api is None:
         monkeypatch.delitem(sys.modules, "agent.conversation_loop")
@@ -202,13 +202,12 @@ def test_install_tolerates_hermes_without_the_rough_defer_hook(
     bindings active instead of turning a compatibility optimization into a
     mandatory private API dependency.
     """
-
     compressor_module = types.ModuleType("agent.context_compressor")
     compressor_module.ContextCompressor = None  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "agent.context_compressor", compressor_module)
     loop, turn_context = install_fake_hermes(
         monkeypatch,
-        lambda messages, *, system_prompt="", tools=None: 7,
+        lambda messages, *, system_prompt="", tools=None: 7,  # noqa: ARG005
     )
 
     cleanup = install(runtime(Counter(123)))
@@ -258,8 +257,7 @@ def test_preflight_counts_provider_visible_api_content_without_mutation(
     undercount injected memory or plugin context and skip compression.  The
     preflight copy must mirror substitution while preserving retry-owned input.
     """
-
-    messages = [
+    messages: list[Any] = [
         {
             "role": "user",
             "content": "clean",
@@ -274,7 +272,7 @@ def test_preflight_counts_provider_visible_api_content_without_mutation(
     ]
     _, turn_context = install_fake_hermes(
         monkeypatch,
-        lambda messages, *, system_prompt="", tools=None: 1,
+        lambda messages, *, system_prompt="", tools=None: 1,  # noqa: ARG005
     )
     counter = Counter(321)
     install(runtime(counter))
@@ -379,7 +377,7 @@ def test_preflight_pressure_matches_the_viable_output_boundary(
 ) -> None:
     _, turn_context = install_fake_hermes(
         monkeypatch,
-        lambda messages, *, system_prompt="", tools=None: 1,
+        lambda messages, *, system_prompt="", tools=None: 1,  # noqa: ARG005
     )
     install(runtime(Counter(prompt_tokens)))
 
@@ -402,7 +400,6 @@ def test_configured_output_reserve_drives_preflight_and_middleware_together(
     the default 4096-token reserve.  Exercise the smallest legal reserve, a
     custom ordinary value, and the largest reserve below this test window.
     """
-
     window = 100
     prompt_tokens = window - minimum_output_tokens + shortfall
     configured = Settings(
@@ -418,7 +415,7 @@ def test_configured_output_reserve_drives_preflight_and_middleware_together(
     active = DynamicOutputBudget(configured, counter)
     _, turn_context = install_fake_hermes(
         monkeypatch,
-        lambda messages, *, system_prompt="", tools=None: 1,
+        lambda messages, *, system_prompt="", tools=None: 1,  # noqa: ARG005
     )
     install(active)
 
@@ -445,7 +442,6 @@ def test_fallback_preflight_and_middleware_share_the_exact_boundary(
     shortfall: int,
 ) -> None:
     """Prove ``W - P - F == R`` is viable and one token less compresses."""
-
     window = 100
     rough_prompt_tokens = (
         window - fallback_margin_tokens - minimum_output_tokens + shortfall
@@ -472,7 +468,7 @@ def test_fallback_preflight_and_middleware_share_the_exact_boundary(
     active = DynamicOutputBudget(
         configured,
         Counter(TimeoutError("exact tokenizer unavailable")),
-        rough_estimator=lambda request: rough_prompt_tokens,
+        rough_estimator=lambda _request: rough_prompt_tokens,
     )
     _, turn_context = install_fake_hermes(monkeypatch, rough)
     install(active)
@@ -498,7 +494,6 @@ def test_live_route_reader_supports_legacy_hermes_globals(
     live-switch protection active across the package's declared compatibility
     range instead of silently trusting a stale tokenizer on the older release.
     """
-
     auxiliary = types.ModuleType("agent.auxiliary_client")
     auxiliary._RUNTIME_MAIN_PROVIDER = "custom"  # type: ignore[attr-defined]
     auxiliary._RUNTIME_MAIN_MODEL = "qwen-test"  # type: ignore[attr-defined]
@@ -516,7 +511,6 @@ def test_live_route_reader_marks_a_broken_private_api_as_unmatched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fail to Hermes' rough estimator when private route lookup breaks."""
-
     auxiliary = types.ModuleType("agent.auxiliary_client")
 
     def fail(field: str) -> str:
@@ -550,7 +544,6 @@ def test_preflight_route_guard_checks_provider_and_endpoint(
     exact preflight must require all configured route dimensions to match.  DNS
     case, a default HTTPS port, and a trailing slash remain the same endpoint.
     """
-
     auxiliary = types.ModuleType("agent.auxiliary_client")
     live_route = {
         "provider": provider,
@@ -577,7 +570,6 @@ def test_preflight_route_guard_checks_provider_and_endpoint(
 
 def test_exact_gate_resolves_profile_runtime_at_call_time() -> None:
     """Use the active profile's resolver for every cheap-gate decision."""
-
     active = runtime(Counter(1))
     calls: list[None] = []
 
@@ -585,7 +577,7 @@ def test_exact_gate_resolves_profile_runtime_at_call_time() -> None:
         calls.append(None)
         return active
 
-    gate = _ExactPreflightGate(resolve, lambda *args, **kwargs: False)
+    gate = _ExactPreflightGate(resolve, lambda *_args, **_kwargs: False)
 
     assert gate([], 3, 20, 64_000) is True
     assert calls == [None]
@@ -596,7 +588,7 @@ def test_preflight_preserves_empty_tool_shape(
 ) -> None:
     _, turn_context = install_fake_hermes(
         monkeypatch,
-        lambda messages, *, system_prompt="", tools=None: 42,
+        lambda messages, *, system_prompt="", tools=None: 42,  # noqa: ARG005
     )
     counter = Counter(123)
     install(runtime(counter))
@@ -677,7 +669,6 @@ def test_preflight_fails_open_for_additive_hermes_estimator_context(
     the complete call to the original estimator instead of raising before the
     request path can proceed.
     """
-
     calls: list[tuple[Any, str, Any, Any]] = []
 
     def rough(
@@ -717,6 +708,7 @@ def test_install_is_idempotent_and_retains_the_initial_fallback(
         system_prompt: str = "",
         tools: Any = None,
     ) -> int:
+        del messages, system_prompt, tools
         return 5
 
     _, turn_context = install_fake_hermes(monkeypatch, rough)
@@ -857,7 +849,6 @@ def test_preflight_runtime_resolver_tracks_the_active_profile() -> None:
     home is ContextVar-scoped.  Resolving lazily ensures the wrapper uses
     the runtime belonging to the profile that initiated this particular turn.
     """
-
     active = runtime(Counter(456))
     calls: list[None] = []
 
@@ -888,7 +879,6 @@ def test_preflight_skips_profiles_without_an_active_plugin_owner() -> None:
     both exact tokenization and any cross-profile prompt disclosure while a
     different profile keeps the shared wrapper installed.
     """
-
     counter = Counter(999)
 
     def rough(
@@ -925,7 +915,6 @@ def test_final_owner_release_cannot_race_active_preflight(is_gate: bool) -> None
     list between truthiness and indexing on free-threaded CPython.  One snapshot
     must instead remain valid for the complete lookup in both wrappers.
     """
-
     checked = threading.Event()
     resume = threading.Event()
 
@@ -946,7 +935,7 @@ def test_final_owner_release_cannot_race_active_preflight(is_gate: bool) -> None
 
     resolver = lambda: None  # noqa: E731
     wrapper = (
-        _ExactPreflightGate(resolver, lambda *args, **kwargs: False)
+        _ExactPreflightGate(resolver, lambda *_args, **_kwargs: False)
         if is_gate
         else _ExactPreflight(resolver, rough)
     )

@@ -40,3 +40,6 @@ jobs:
 
       - name: Run mypy
         run: mypy incontext
+
+      - name: Run mypy for tests
+        run: mypy tests --exclude tests/typing

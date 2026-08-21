@@ -5,7 +5,7 @@ import sys
 import types
 from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 from unittest.mock import patch
 
 import pytest
@@ -13,7 +13,7 @@ import pytest
 from incontext import settings
 
 base_environment: dict[str, str] = {}
-base_config = {
+base_config: dict[str, Any] = {
     "model": {
         "default": "qwen-test",
         "context_length": 65_536,
@@ -28,7 +28,7 @@ base_config = {
 class ModernCompressor:
     calls: ClassVar[list[dict[str, Any]]] = []
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         model: str,
         threshold_percent: float,
@@ -67,12 +67,11 @@ def test_settings_remains_slotted_on_python_38() -> None:
     validation.  Retaining both slots and the frozen dataclass guard prevents a
     later field assignment from silently changing only part of that snapshot.
     """
-
     loaded = load()
 
     assert not hasattr(loaded, "__dict__")
     with pytest.raises(FrozenInstanceError):
-        loaded.model_name = "changed-after-validation"
+        cast(Any, loaded).model_name = "changed-after-validation"
 
 
 @pytest.mark.parametrize(("value", "expected"), [(1, 1), (" 42 ", 42), (0, 0)])
@@ -128,7 +127,6 @@ def test_strict_float_wraps_unrepresentable_integer() -> None:
     configured threshold must fail as ``SettingsError`` like every other
     malformed numeric value instead of leaking ``OverflowError`` from startup.
     """
-
     with pytest.raises(settings.SettingsError, match="must be numeric"):
         settings._strict_float(10**10_000, "value", minimum_exclusive=0)
 
@@ -203,7 +201,6 @@ def test_load_settings_uses_configured_minimum_output_reserve() -> None:
 
 def test_load_settings_accepts_the_last_viable_fallback_policy() -> None:
     """Allow the equality edge that still leaves one token for the prompt."""
-
     result = load(
         environment={
             "INCONTEXT_COMPRESSION_WINDOW_TOKENS": "5000",
@@ -224,7 +221,6 @@ def test_load_settings_rejects_a_fallback_policy_with_no_viable_prompt() -> None
     so fallback preflight would request compression forever without a viable
     post-compression budget.
     """
-
     with pytest.raises(
         settings.SettingsError,
         match="fallback_margin_tokens plus min_output_tokens must be below",
@@ -258,7 +254,6 @@ def test_normalized_model_thresholds_skips_unrepresentable_integer() -> None:
     valid model overrides; it belongs to the same rejected category as NaN and
     infinity and is therefore omitted from the normalized mapping.
     """
-
     assert settings._normalized_model_thresholds({"huge": 10**10_000}) == {}
 
 
@@ -285,7 +280,7 @@ def test_construct_compressor_passes_all_keywords_to_flexible_class() -> None:
 
 def test_construct_compressor_wraps_initialization_failure() -> None:
     class Broken:
-        def __init__(self, **kwargs: Any) -> None:
+        def __init__(self, **_kwargs: Any) -> None:
             raise ValueError("boom")
 
     with pytest.raises(settings.SettingsError, match="initialization failed"):
@@ -334,7 +329,6 @@ def test_base_url_normalization_preserves_route_identity(
     relative, credential-bearing, and malformed authorities stay untouched so
     normalization never invents a different route.
     """
-
     assert settings.normalize_base_url(value) == expected
 
 
@@ -346,7 +340,6 @@ def test_literal_custom_provider_precedes_the_model_endpoint() -> None:
     every live base-URL guard abstain and silently disables exact budgeting on
     the endpoint Hermes actually calls.
     """
-
     config = {
         **base_config,
         "model": {
@@ -372,7 +365,6 @@ def test_load_settings_uses_effective_named_custom_route() -> None:
     and an empty raw ``model.base_url`` makes both public and auxiliary
     budgeting reject the configured primary route entirely.
     """
-
     config = {
         **base_config,
         "model": {
@@ -430,7 +422,6 @@ def test_load_settings_matches_all_hermes_named_provider_selectors(
     ``custom`` before middleware and auxiliary builders run.  Retaining a
     selector literal makes both route guards reject the actual primary route.
     """
-
     result = load(
         config={
             **base_config,
@@ -455,7 +446,6 @@ def test_named_provider_identity_preserves_repeated_spaces() -> None:
     whitespace first changes that identity to ``edge-name`` and makes
     incontext reject a provider that the installed runtime resolves.
     """
-
     result = load(
         config={
             "model": {
@@ -487,7 +477,6 @@ def test_load_settings_resolves_legacy_custom_provider_route(selector: str) -> N
     makes route guards miss every request.  Legacy normalization deliberately
     drops unsupported output-cap metadata before constructing the runtime.
     """
-
     ModernCompressor.calls.clear()
     result = load(
         config={
@@ -545,7 +534,6 @@ def test_prefixed_custom_identity_resolves_in_both_provider_schemas(
     request prefix without canonicalizing the stored identity makes a valid
     live route fail plugin registration.
     """
-
     result = load(
         config={
             "model": {
@@ -576,7 +564,6 @@ def test_disabled_modern_provider_falls_through_to_legacy_entry(
     silently disables exact budgeting on the valid legacy route.  Boolean,
     string, and truth-value forms must follow Hermes' compatibility parser.
     """
-
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []  # type: ignore[attr-defined]
     config_module = types.ModuleType("hermes_cli.config")
@@ -628,7 +615,6 @@ def test_older_hermes_does_not_apply_a_future_provider_enabled_flag(
     incontext scope itself to a legacy fallback while the installed agent uses
     the modern endpoint, silently disabling budgeting on the live request.
     """
-
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
@@ -667,7 +653,6 @@ def test_provider_enabled_fails_open_when_installed_helper_raises(
     retain the provider as older releases did rather than silently switching
     to another endpoint before the agent itself resolves the route.
     """
-
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []  # type: ignore[attr-defined]
     config_module = types.ModuleType("hermes_cli.config")
@@ -691,7 +676,6 @@ def test_legacy_custom_provider_lookup_returns_none_without_a_match() -> None:
     built-in path; selecting the last unrelated entry would scope the vLLM
     tokenizer and context window to the wrong external destination.
     """
-
     assert (
         settings._legacy_provider_config(
             [{"name": "Unrelated", "base_url": "https://unused.invalid/v1"}],
@@ -728,7 +712,6 @@ def test_named_provider_uses_hermes_effective_endpoint(
     either disables budgeting on the primary route or removes the URL guard and
     permits the primary tokenizer on an unrelated custom fallback.
     """
-
     model: dict[str, Any] = {
         "default": "qwen-test",
         "provider": "custom:local",
@@ -761,7 +744,6 @@ def test_named_provider_uses_hermes_camelcase_base_url_alias() -> None:
     the shared provider label ``custom``, allowing a same-model fallback to be
     budgeted with the primary tokenizer and context window.
     """
-
     result = load(
         config={
             "model": {
@@ -791,7 +773,6 @@ def test_legacy_entry_precedes_compatibility_normalized_modern_base_url() -> Non
     modern ``baseUrl`` immediately gives incontext a different endpoint guard
     from the agent that will send the request.
     """
-
     result = load(
         config={
             "model": {
@@ -830,7 +811,6 @@ def test_compatibility_provider_lookup_ignores_unusable_entries(
     URLs.  Treating any of those as selected would remove or corrupt endpoint
     isolation for the tokenizer-backed budget.
     """
-
     assert settings._compatible_modern_provider_config(providers, "edge") is None
 
 
@@ -843,7 +823,6 @@ def test_compatibility_provider_lookup_skips_version_disabled_entry(
     normalized later.  When the installed release supports disabling entries,
     that later path must skip it too or incontext revives a route Hermes hides.
     """
-
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []  # type: ignore[attr-defined]
     config_module = types.ModuleType("hermes_cli.config")
@@ -875,7 +854,6 @@ def test_legacy_provider_accepts_runtime_url_placeholder() -> None:
     a valid provider from incontext and make plugin startup disagree with the
     agent's later resolved route.
     """
-
     assert settings._valid_provider_endpoint("https://${REGION}.example/v1") == (
         "https://${REGION}.example/v1"
     )
@@ -918,7 +896,6 @@ def test_legacy_provider_uses_hermes_normalized_endpoint(
     ``url`` and ``api``.  Using modern precedence stores a different route and
     makes middleware reject the endpoint the running agent actually calls.
     """
-
     result = load(
         config={
             "model": {
@@ -941,7 +918,6 @@ def test_incomplete_provider_entries_fall_through_to_usable_legacy_entry() -> No
     URL.  Treating either incomplete record as selected removes endpoint
     isolation and hides a valid legacy route with the same durable identity.
     """
-
     result = load(
         config={
             "model": {
@@ -978,7 +954,6 @@ def test_malformed_modern_provider_data_falls_through_to_legacy(
     ``custom_providers``.  Failing immediately aborts plugin registration even
     though the agent has already selected a valid backward-compatible route.
     """
-
     result = load(
         config={
             "model": {
@@ -1005,7 +980,6 @@ def test_bare_custom_incomplete_modern_entry_falls_through_to_legacy() -> None:
     the compatibility list.  Stopping at the incomplete mapping removes the
     URL scope and can apply the primary tokenizer to another custom route.
     """
-
     result = load(
         config={
             "model": {
@@ -1032,7 +1006,6 @@ def test_provider_selector_preserves_underscores_as_identity() -> None:
     the first colliding provider and store an endpoint that the live agent does
     not use, causing every exact-budget route guard to miss.
     """
-
     result = load(
         config={
             "model": {
@@ -1059,7 +1032,6 @@ def test_colon_bearing_provider_selector_matches_its_literal_key() -> None:
     prefix resolves the unrelated ``edge`` entry instead, attaching the wrong
     endpoint and context policy to otherwise valid requests.
     """
-
     result = load(
         config={
             "model": {
@@ -1086,7 +1058,6 @@ def test_legacy_provider_skips_malformed_higher_precedence_url() -> None:
     as route identity makes incontext reject the valid endpoint actually used
     by generation and silently disables exact budgeting.
     """
-
     result = load(
         config={
             "model": {
@@ -1116,7 +1087,6 @@ def test_load_settings_uses_live_identity_for_local_provider_alias(alias: str) -
     before invoking request middleware.  Keeping the configured alias would
     silently disable exact budgeting even though the endpoint and model match.
     """
-
     result = load(
         config={
             **base_config,
@@ -1161,7 +1131,6 @@ def test_load_settings_rejects_invalid_provider_route_configuration(
     them would either disable dynamic budgeting or apply the primary tokenizer
     and context window to a different fallback endpoint.
     """
-
     with pytest.raises(settings.SettingsError, match="provider"):
         load(config=config)
 
@@ -1173,7 +1142,6 @@ def test_load_settings_preserves_nonlocal_builtin_provider() -> None:
     to ``custom``.  A built-in provider without a matching profiles entry must
     retain its live middleware label while still using the configured model URL.
     """
-
     result = load(
         config={
             **base_config,
@@ -1194,7 +1162,6 @@ def test_auto_provider_with_local_endpoint_uses_live_openrouter_identity() -> No
     not the literal selector ``auto``; retaining ``auto`` makes route guards
     reject every otherwise matching primary request.
     """
-
     result = load(
         config={
             **base_config,
@@ -1224,7 +1191,6 @@ def test_auto_local_route_excludes_known_cloud_hosts(
     expected: bool,
 ) -> None:
     """Apply Hermes' auto bypass only to explicit non-cloud endpoints."""
-
     assert settings._auto_uses_openai_compatible_route(base_url) is expected
 
 
@@ -1238,7 +1204,6 @@ def test_load_settings_uses_hermes_live_identity_for_builtin_alias(
     middleware.  Retaining the configuration spelling makes both primary and
     auxiliary route guards reject the intended request before exact counting.
     """
-
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []  # type: ignore[attr-defined]
     auth = types.ModuleType("hermes_cli.auth")
@@ -1281,7 +1246,6 @@ def test_canonical_builtin_provider_is_not_shadowed_by_custom_entry(
     both route guards reject every real primary request, silently disabling
     exact budgeting.
     """
-
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []  # type: ignore[attr-defined]
     auth = types.ModuleType("hermes_cli.auth")
@@ -1316,7 +1280,6 @@ def test_load_settings_keeps_provider_when_hermes_alias_resolution_fails(
     itself treats later provider setup as authoritative, so incontext must
     preserve the normalized selector rather than disable plugin registration.
     """
-
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []  # type: ignore[attr-defined]
     auth = types.ModuleType("hermes_cli.auth")
@@ -1349,7 +1312,6 @@ def test_load_settings_uses_hermes_normalized_model_identity(
     scoping skip exact budgeting and can evaluate model-specific compression
     policy under a different identity.
     """
-
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []  # type: ignore[attr-defined]
     model_normalize = types.ModuleType("hermes_cli.model_normalize")
@@ -1400,7 +1362,6 @@ def test_model_normalization_remains_best_effort_like_hermes(
     retain the configured model under the same conditions instead of making an
     optional compatibility helper a startup dependency.
     """
-
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []  # type: ignore[attr-defined]
     model_normalize = types.ModuleType("hermes_cli.model_normalize")
@@ -1496,7 +1457,6 @@ def test_effective_threshold_delegates_to_installed_hermes_policy(
     forwards model, provider, opt-out state, and the final autoraise verdict
     rather than reimplementing those rules.
     """
-
     agent = types.ModuleType("agent")
     agent.__path__ = []  # type: ignore[attr-defined]
     agent_init = types.ModuleType("agent.agent_init")
@@ -1525,9 +1485,9 @@ def test_effective_threshold_delegates_to_installed_hermes_policy(
     agent_init._resolve_compression_threshold = resolve  # type: ignore[attr-defined]
     auxiliary._compression_threshold_for_model = model_threshold  # type: ignore[attr-defined]
     auxiliary._is_codex_gpt54_or_gpt55 = (  # type: ignore[attr-defined]
-        lambda model, provider: False
+        lambda _model, _provider: False
     )
-    auxiliary._is_codex_spark = lambda model, provider: True  # type: ignore[attr-defined]
+    auxiliary._is_codex_spark = lambda _model, _provider: True  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "agent", agent)
     monkeypatch.setitem(sys.modules, "agent.agent_init", agent_init)
     monkeypatch.setitem(
@@ -1567,7 +1527,6 @@ def test_effective_threshold_uses_legacy_hermes_policy(
     a ``None`` result retains the configured threshold, so incontext and the
     installed compressor always derive the same boundary.
     """
-
     agent = types.ModuleType("agent")
     agent.__path__ = []  # type: ignore[attr-defined]
     auxiliary = types.ModuleType("agent.auxiliary_client")
@@ -1609,18 +1568,17 @@ def test_effective_threshold_falls_back_when_hermes_policy_fails(
     If a future compatible release raises while resolving optional model policy,
     incontext must retain the validated global threshold just as Hermes does.
     """
-
     agent = types.ModuleType("agent")
     agent.__path__ = []  # type: ignore[attr-defined]
     agent_init = types.ModuleType("agent.agent_init")
     auxiliary = types.ModuleType("agent.auxiliary_client")
 
-    def model_policy(*args: Any, **kwargs: Any) -> float:
+    def model_policy(*_args: Any, **_kwargs: Any) -> float:
         if failure_stage == "threshold":
             raise RuntimeError("policy unavailable")
         return 0.9
 
-    def resolver(*args: Any, **kwargs: Any) -> tuple[float, None]:
+    def resolver(*_args: Any, **_kwargs: Any) -> tuple[float, None]:
         if failure_stage == "resolver":
             raise RuntimeError("resolver unavailable")
         return 0.9, None
@@ -1628,9 +1586,9 @@ def test_effective_threshold_falls_back_when_hermes_policy_fails(
     agent_init._resolve_compression_threshold = resolver  # type: ignore[attr-defined]
     auxiliary._compression_threshold_for_model = model_policy  # type: ignore[attr-defined]
     auxiliary._is_codex_gpt54_or_gpt55 = (  # type: ignore[attr-defined]
-        lambda model, provider: False
+        lambda _model, _provider: False
     )
-    auxiliary._is_codex_spark = lambda model, provider: False  # type: ignore[attr-defined]
+    auxiliary._is_codex_spark = lambda _model, _provider: False  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "agent", agent)
     monkeypatch.setitem(sys.modules, "agent.agent_init", agent_init)
     monkeypatch.setitem(
@@ -1658,7 +1616,6 @@ def test_load_settings_reserves_hermes_configured_output_budget() -> None:
     threshold.  Dropping that value here produces a larger, fictitious window
     and lets incontext budget requests beyond Hermes' actual boundary.
     """
-
     ModernCompressor.calls.clear()
     config = {
         **base_config,
@@ -1689,7 +1646,6 @@ def test_load_settings_reserves_hermes_environment_output_budget() -> None:
     override is not folded into ``load_config()``, so it must be read through a
     typed skelet storage or incontext would derive a larger unsafe window.
     """
-
     ModernCompressor.calls.clear()
     config = {
         **base_config,
@@ -1721,7 +1677,6 @@ def test_load_settings_uses_only_a_selected_provider_output_budget() -> None:
     metadata on an incomplete provider block must not reserve output space in
     incontext when Hermes ignores that block entirely.
     """
-
     ModernCompressor.calls.clear()
     config = {
         **base_config,
@@ -1763,7 +1718,6 @@ def test_load_settings_reserves_provider_max_tokens_alias() -> None:
     compressor for the same named provider.  When both aliases remain after a
     configuration migration, its modern ``max_output_tokens`` value wins.
     """
-
     ModernCompressor.calls.clear()
     config = {
         **base_config,
@@ -1801,7 +1755,6 @@ def test_blank_hermes_max_tokens_falls_back_to_model_configuration() -> None:
     ``model.max_tokens``.  Native skelet conversion and validation must mirror
     that behavior instead of failing plugin registration.
     """
-
     ModernCompressor.calls.clear()
     config = {
         **base_config,
@@ -1833,7 +1786,6 @@ def test_invalid_hermes_max_tokens_fails_native_environment_validation() -> None
     leak a raw conversion exception or silently fall through to YAML because
     Hermes itself would be unable to construct a matching token allowance.
     """
-
     with pytest.raises(
         settings.SettingsError,
         match="max_tokens must be a positive integer or blank",
@@ -1849,7 +1801,6 @@ def test_load_settings_rejects_invalid_hermes_output_budget(value: Any) -> None:
     be silently converted into a different compression threshold by incontext.
     The validation mirrors the strict integer rules used for context length.
     """
-
     config = {
         **base_config,
         "model": {**base_config["model"], "max_tokens": value},
@@ -1870,7 +1821,6 @@ def test_load_settings_ignores_provider_caps_hermes_does_not_promote(
     out of ``AIAgent``.  Parsing the raw value changes the reconstructed
     compression boundary even though the live runtime ignores it.
     """
-
     config = {
         **base_config,
         "model": {
@@ -1894,7 +1844,7 @@ def test_load_settings_ignores_provider_caps_hermes_does_not_promote(
 
 def test_load_settings_explicit_window_avoids_compressor_construction() -> None:
     class MustNotRun:
-        def __init__(self, **kwargs: Any) -> None:
+        def __init__(self, **_kwargs: Any) -> None:
             raise AssertionError("compressor should not run")
 
     result = load(
@@ -1921,7 +1871,7 @@ def test_disabled_hermes_compression_uses_the_complete_context_window(
     """
 
     class MustNotRun:
-        def __init__(self, **kwargs: Any) -> None:
+        def __init__(self, **_kwargs: Any) -> None:
             raise AssertionError("inactive compressor threshold must not be used")
 
     result = load(
@@ -1944,7 +1894,6 @@ def test_load_settings_rejects_non_builtin_context_engine() -> None:
     class would silently give request middleware an unrelated window, which can
     truncate valid output or cross the active engine's real boundary.
     """
-
     config = {**base_config, "context": {"engine": "lcm"}}
 
     with pytest.raises(
@@ -1962,7 +1911,6 @@ def test_explicit_window_supports_external_context_engine_safely() -> None:
     compressor is constructed, so the plugin can budget against the stated
     external boundary without inventing engine-specific policy.
     """
-
     result = load(
         environment={"INCONTEXT_COMPRESSION_WINDOW_TOKENS": "50000"},
         config={**base_config, "context": {"engine": "lcm"}},
@@ -2103,7 +2051,6 @@ def test_load_settings_ignores_non_mapping_providers_for_direct_route() -> None:
     whole otherwise valid profile before it can scope budgeting to the model's
     explicit custom URL.
     """
-
     result = load(config={**base_config, "providers": "invalid"})
 
     assert result.provider == "custom"
@@ -2122,7 +2069,7 @@ def test_load_settings_requires_model_name(model_name: Any) -> None:
 
 def test_load_settings_rejects_context_mismatch() -> None:
     class Mismatch(ModernCompressor):
-        def __init__(self, **kwargs: Any) -> None:
+        def __init__(self, **_kwargs: Any) -> None:
             self.context_length = 32_000
             self.threshold_tokens = 20_000
 
