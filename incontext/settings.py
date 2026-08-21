@@ -18,7 +18,6 @@ class SettingsError(RuntimeError):
 
 def _optional_positive_integer_text(value: str) -> bool:
     """Validate an optional integer environment value after whitespace removal."""
-
     if not value:
         return True
     try:
@@ -114,7 +113,6 @@ class Settings:
 
 def normalize_base_url(value: Any) -> str:
     """Return a stable route identity for equivalent HTTP endpoint spellings."""
-
     text = str(value or "").strip().rstrip("/")
     if not text:
         return ""
@@ -246,7 +244,6 @@ def _effective_compression_threshold(
     compression: Mapping[str, Any],
 ) -> float:
     """Reuse Hermes' installed model-specific threshold policy when available."""
-
     try:
         from agent.auxiliary_client import (  # type: ignore[import-not-found]  # noqa: PLC0415
             _compression_threshold_for_model,
@@ -303,13 +300,11 @@ def _effective_compression_threshold(
 
 def _normalized_provider_selector(value: Any) -> str:
     """Normalize the menu spelling Hermes uses for named providers."""
-
     return str(value or "").strip().lower().replace(" ", "-")
 
 
 def _custom_provider_aliases(display_name: Any, provider_key: Any) -> Set[str]:
     """Return normalized durable identities accepted by Hermes custom routes."""
-
     aliases: Set[str] = set()
     for value in (display_name, provider_key):
         normalized = _normalized_provider_selector(value)
@@ -328,7 +323,6 @@ def _custom_provider_aliases(display_name: Any, provider_key: Any) -> Set[str]:
 
 def _provider_enabled(configured: Mapping[str, Any]) -> bool:
     """Delegate optional enabled semantics to the installed Hermes release."""
-
     try:
         from hermes_cli.config import (  # noqa: PLC0415
             is_provider_enabled,
@@ -345,13 +339,11 @@ def _provider_enabled(configured: Mapping[str, Any]) -> bool:
 
 def _modern_provider_endpoint(configured: Mapping[str, Any]) -> Any:
     """Resolve aliases read by Hermes' direct modern-provider fast path."""
-
     return configured.get("api") or configured.get("url") or configured.get("base_url")
 
 
 def _valid_provider_endpoint(value: Any) -> Optional[str]:
     """Return a URL accepted by Hermes' compatibility normalizer."""
-
     if not isinstance(value, str) or not value.strip():
         return None
     candidate = value.strip()
@@ -365,7 +357,6 @@ def _normalized_legacy_provider(
     configured: Mapping[str, Any],
 ) -> Optional[Mapping[str, Any]]:
     """Return Hermes' canonical view of one legacy provider entry."""
-
     endpoint = next(
         (
             candidate
@@ -391,7 +382,6 @@ def _named_provider_config(
     selector: str,
 ) -> Optional[Mapping[str, Any]]:
     """Find a providers entry by mapping key or normalized display name."""
-
     target = _normalized_provider_selector(selector)
     for key, configured in providers.items():
         if not isinstance(configured, Mapping):
@@ -412,7 +402,6 @@ def _compatible_modern_provider_config(
     selector: str,
 ) -> Optional[Mapping[str, Any]]:
     """Normalize camelCase modern entries after the legacy compatibility view."""
-
     target = _normalized_provider_selector(selector)
     for key, configured in providers.items():
         if not isinstance(configured, Mapping):
@@ -433,7 +422,6 @@ def _legacy_provider_config(
     selector: str,
 ) -> Optional[Mapping[str, Any]]:
     """Find a saved list-style custom provider still supported by Hermes."""
-
     if not isinstance(custom_providers, list):
         return None
     target = _normalized_provider_selector(selector)
@@ -456,7 +444,6 @@ def _configured_provider(
     selector: str,
 ) -> Optional[Mapping[str, Any]]:
     """Resolve the new mapping before Hermes' legacy provider list."""
-
     configured = _named_provider_config(providers, selector)
     if configured is not None:
         return configured
@@ -470,7 +457,6 @@ def _configured_provider(
 
 def _resolved_builtin_provider(provider: str) -> Optional[str]:
     """Return Hermes' canonical built-in identity when its registry accepts it."""
-
     try:
         from hermes_cli.auth import (  # type: ignore[import-not-found]  # noqa: PLC0415
             resolve_provider,
@@ -486,7 +472,6 @@ def _resolved_builtin_provider(provider: str) -> Optional[str]:
 
 def _effective_model_name(model: str, provider: str) -> str:
     """Mirror Hermes' provider-aware model normalization when available."""
-
     try:
         from hermes_cli.model_normalize import (  # type: ignore[import-not-found]  # noqa: PLC0415
             _AGGREGATOR_PROVIDERS,
@@ -509,7 +494,6 @@ def _effective_bare_provider(
     custom_providers: Any,
 ) -> Tuple[str, Mapping[str, Any], bool]:
     """Resolve a non-empty, non-custom selector using Hermes' precedence."""
-
     canonical = _resolved_builtin_provider(provider)
     if canonical == provider:
         return canonical, {}, False
@@ -529,7 +513,6 @@ def _effective_provider_route(
     custom_providers: Any = None,
 ) -> Tuple[str, str, Mapping[str, Any]]:
     """Resolve Hermes' selector into its live provider and endpoint identity."""
-
     provider_selector = _normalized_provider_selector(model.get("provider"))
     provider = provider_selector
     provider_config: Mapping[str, Any] = {}
@@ -589,7 +572,6 @@ def _effective_provider_route(
 
 def _auto_uses_openai_compatible_route(base_url: Any) -> bool:
     """Mirror Hermes' explicit-local-endpoint bypass for provider auto."""
-
     value = str(base_url or "").strip()
     if not value:
         return False
@@ -606,7 +588,6 @@ def _effective_max_tokens(
     environment: HermesEnvironment,
 ) -> Optional[int]:
     """Resolve Hermes' output allowance in the same precedence order."""
-
     if environment.max_tokens:
         return int(environment.max_tokens)
     configured = model.get("max_tokens")
@@ -629,7 +610,6 @@ def _validate_context_engine(
     window_override: int,
 ) -> None:
     """Require a known boundary for non-default Hermes context engines."""
-
     context_engine = str(context.get("engine") or "compressor").strip().lower()
     if window_override == 0 and context_engine != "compressor":
         raise SettingsError(
@@ -647,7 +627,6 @@ def _resolve_compression_window(
     window_override: int,
 ) -> int:
     """Resolve the active automatic boundary without duplicating policy."""
-
     if window_override != 0:
         return window_override
     if not compression_enabled:
@@ -676,7 +655,6 @@ def _validate_budget_reserves(
     min_output_tokens: int,
 ) -> None:
     """Reject reserves that cannot leave a viable fallback request."""
-
     if fallback_margin >= compression_window:
         raise SettingsError(
             "fallback_margin_tokens must be below the compression window",
@@ -703,7 +681,6 @@ def load_settings(
     The compression window is obtained from Hermes' real ``ContextCompressor``
     instead of duplicating its version-sensitive threshold arithmetic.
     """
-
     if config_loader is None or compressor_class is None:
         default_loader, default_compressor = _load_hermes_components()
         config_loader = config_loader or default_loader

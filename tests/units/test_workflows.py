@@ -13,7 +13,6 @@ def test_release_waits_for_every_behavioral_quality_workflow() -> None:
     PyPI.  The release workflow must invoke each reusable quality workflow and
     make its trusted-publishing job depend on all three successful results.
     """
-
     release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
 
     assert "uses: ./.github/workflows/lint.yml" in release
@@ -34,7 +33,6 @@ def test_release_quality_workflows_expose_reusable_entry_points() -> None:
     protects the package index.  Lint and unit jobs must also exercise every
     interpreter promised by package metadata, including free-threaded Python.
     """
-
     for name in ("lint.yml", "tests_and_coverage.yml", "hermes_e2e.yml"):
         contents = (WORKFLOWS / name).read_text(encoding="utf-8")
         assert "  workflow_call:\n" in contents
@@ -47,6 +45,9 @@ def test_release_quality_workflows_expose_reusable_entry_points() -> None:
         contents = (WORKFLOWS / name).read_text(encoding="utf-8")
         assert python_matrix in contents
 
+    lint = (WORKFLOWS / "lint.yml").read_text(encoding="utf-8")
+    assert "mypy tests --exclude tests/typing" in lint
+
 
 def test_distribution_workflow_imports_wheel_code_in_isolation() -> None:
     """Reject metadata-only distribution checks that accept an empty wheel.
@@ -57,7 +58,6 @@ def test_distribution_workflow_imports_wheel_code_in_isolation() -> None:
     Python, prove the module came from site-packages, and load both published
     plugin entry points from the installed wheel.
     """
-
     workflow = (WORKFLOWS / "tests_and_coverage.yml").read_text(encoding="utf-8")
 
     assert "wheel-check/bin/python -I" in workflow

@@ -92,19 +92,16 @@ class VllmBackend(Backend):
     @property
     def source(self) -> str:
         """Identify successful counts without exposing endpoint details."""
-
         return "vllm-tokenize"
 
     def output_budget_field(self, requested_field: str) -> str:
         """Map Responses-only output caps to vLLM Chat Completions fields."""
-
         return (
             "max_tokens" if requested_field == "max_output_tokens" else requested_field
         )
 
     def coerce_output_budget(self, value: Any) -> Optional[int]:
         """Mirror vLLM's non-strict positive integer output caps."""
-
         coerced = self._coerce_non_strict_integer(value)
         return coerced if coerced is not None and coerced > 0 else None
 
@@ -115,7 +112,6 @@ class VllmBackend(Backend):
         context_length: int,
     ) -> Optional[int]:
         """Respect vLLM's coupled prompt-truncation/output validation."""
-
         truncation_limit = self._wire_prompt_truncation_limit(request)
         return None if truncation_limit is None else context_length - truncation_limit
 
@@ -126,7 +122,6 @@ class VllmBackend(Backend):
         context_length: int,
     ) -> int:
         """Return the exact provider-visible prompt token count."""
-
         reused_prompt_tokens = self._reused_prompt_token_count(request)
         self._validate_prompt_controls(request, reused_prompt_tokens)
         truncation_limit = (
@@ -196,7 +191,6 @@ class VllmBackend(Backend):
 
     def clear_cache(self) -> None:
         """Discard cached counts without disturbing an in-flight request."""
-
         with self._cache_lock:
             self._cache_epoch += 1
             self._cache.clear()
@@ -262,7 +256,6 @@ class VllmBackend(Backend):
         reused_prompt_tokens: Optional[int],
     ) -> None:
         """Reject generation controls absent from vLLM's tokenize schema."""
-
         if reused_prompt_tokens is not None:
             return
         extra_body = request.get("extra_body")
@@ -287,7 +280,6 @@ class VllmBackend(Backend):
     @staticmethod
     def _materialize_wire_value(value: Any) -> Any:
         """Copy reusable OpenAI containers into JSON-compatible shapes."""
-
         if isinstance(value, Mapping):
             return {
                 key: VllmBackend._materialize_wire_value(nested)
@@ -300,7 +292,6 @@ class VllmBackend(Backend):
     @staticmethod
     def _normalize_tools(tools: Any) -> Optional[List[Any]]:
         """Materialize reusable OpenAI tool sequences for JSON tokenization."""
-
         if isinstance(tools, list):
             return tools
         if isinstance(tools, Collection) and not isinstance(
@@ -313,7 +304,6 @@ class VllmBackend(Backend):
     @staticmethod
     def _normalize_messages(messages: Any) -> Any:
         """Mirror vLLM's deprecated reasoning-field normalization."""
-
         if not isinstance(messages, Collection) or isinstance(
             messages,
             (str, bytes, Mapping),
@@ -360,7 +350,6 @@ class VllmBackend(Backend):
         key: str,
     ) -> int:
         """Read a response integer for a token sequence that may be empty."""
-
         value = response.get(key)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise cls.VllmBackendError(
@@ -374,7 +363,6 @@ class VllmBackend(Backend):
         request: Dict[str, Any],
     ) -> Optional[int]:
         """Return a safe final-prompt cap derived from vLLM truncation."""
-
         truncation_limit = cls._wire_prompt_truncation_limit(request)
         if truncation_limit is None or cls._has_multimodal_content(request):
             # vLLM truncates rendered text token IDs before expanding media
@@ -390,7 +378,6 @@ class VllmBackend(Backend):
         request: Dict[str, Any],
     ) -> Optional[int]:
         """Resolve vLLM's non-negative wire-level truncation constraint."""
-
         extra_body = request.get("extra_body")
         value = (
             extra_body.get(
@@ -410,7 +397,6 @@ class VllmBackend(Backend):
     @staticmethod
     def _coerce_non_strict_integer(value: Any) -> Optional[int]:
         """Mirror vLLM's Pydantic integer coercion without adding a dependency."""
-
         if isinstance(value, bool):
             return int(value)
         if isinstance(value, int):
@@ -427,7 +413,6 @@ class VllmBackend(Backend):
     @classmethod
     def _reused_prompt_token_count(cls, request: Dict[str, Any]) -> Optional[int]:
         """Count vLLM disaggregated-decode prompt IDs when supplied."""
-
         extra_body = request.get("extra_body")
         params = (
             extra_body.get("kv_transfer_params", request.get("kv_transfer_params"))
@@ -458,7 +443,6 @@ class VllmBackend(Backend):
     @staticmethod
     def _has_multimodal_content(request: Dict[str, Any]) -> bool:
         """Detect media-bearing messages in the provider-visible request."""
-
         extra_body = request.get("extra_body")
         messages = (
             extra_body.get("messages", request.get("messages"))

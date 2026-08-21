@@ -78,7 +78,6 @@ def test_vllm_maps_responses_output_cap_to_chat_completions() -> None:
     translates only that incompatible alias and preserves aliases that the
     endpoint already understands.
     """
-
     backend, _ = make_backend()
 
     assert backend.output_budget_field("max_output_tokens") == "max_tokens"
@@ -111,7 +110,6 @@ def test_vllm_coerces_output_caps_like_chat_request_validation(
     spellings.  Dynamic budgeting must preserve exactly those caller bounds;
     accepting or dropping a different spelling changes the provider request.
     """
-
     backend, _ = make_backend()
 
     assert backend.coerce_output_budget(wire_value) == expected
@@ -125,7 +123,6 @@ def test_default_user_agent_tracks_distribution_version() -> None:
     prevents a copied version literal from silently identifying a newer client
     as an older release after future version bumps.
     """
-
     with patch.dict(
         "os.environ",
         {"INCONTEXT_TOKENIZER_URL": "https://inference.test/tokenize"},
@@ -166,7 +163,6 @@ def test_build_payload_honors_read_only_extra_body_overrides() -> None:
     tokenizes the superseded model, messages, and tools, so exact budgeting can
     use an unrelated chat template and undercount the actual prompt.
     """
-
     wire_messages = ({"role": "user", "content": "wire"},)
     wire_tools = ({"type": "function", "function": {"name": "wire"}},)
 
@@ -199,7 +195,6 @@ def test_build_payload_materializes_tuple_tools_like_openai_sdk() -> None:
     rendered prompt and undercounts it.  Materialization must not mutate the
     caller-owned tuple that Hermes can reuse for retries.
     """
-
     tools = (
         {
             "type": "function",
@@ -231,7 +226,6 @@ def test_build_payload_recursively_materializes_openai_wire_mappings() -> None:
     the tokenizer payload even though generation reaches vLLM normally,
     disabling exact counting.  Copies must also preserve caller ownership.
     """
-
     content_part = MappingProxyType({"type": "text", "text": "hello"})
     content_parts = {"only": content_part}
     message = MappingProxyType(
@@ -279,7 +273,6 @@ def test_build_payload_mirrors_every_prompt_affecting_vllm_option() -> None:
     payload must forward the same options with the same precedence instead of
     silently restoring ``add_generation_prompt=True``.
     """
-
     request = {
         "model": "qwen",
         "messages": [{"role": "assistant", "content": "prefix"}],
@@ -329,7 +322,6 @@ def test_count_rejects_prompt_controls_missing_from_tokenize_schema(
     both normal fields and OpenAI's authoritative ``extra_body`` override must
     therefore fail before transport and let the middleware estimate safely.
     """
-
     backend, opener = make_backend([response(7)])
     request: dict[str, Any] = {
         "model": "qwen",
@@ -358,7 +350,6 @@ def test_build_payload_applies_extra_body_to_core_chat_fields() -> None:
     tool schema; an explicit empty tool list must also remain distinguishable
     from an omitted field for vLLM's chat renderer.
     """
-
     override_messages = [{"role": "user", "content": "override"}]
     request = {
         "model": "original",
@@ -388,7 +379,6 @@ def test_build_payload_reproduces_vllm_reasoning_and_rag_rendering() -> None:
     make Qwen's generation prompt tens of tokens different before any content
     or tool-schema growth is considered.
     """
-
     request = {
         "model": "qwen",
         "messages": [{"role": "user", "content": "answer from context"}],
@@ -424,7 +414,6 @@ def test_build_payload_normalizes_deprecated_reasoning_content() -> None:
     modern null is considered unset, while a null legacy value is simply
     removed, matching the provider's null-aware validator exactly.
     """
-
     legacy = MappingProxyType(
         {
             "role": "assistant",
@@ -494,7 +483,6 @@ def test_reasoning_normalization_preserves_unvalidated_message_shapes() -> None:
     malformed scalar unchanged ensures ``/tokenize`` rejects the same value as
     chat generation instead of silently manufacturing a different prompt.
     """
-
     assert VllmBackend._normalize_messages("invalid") == "invalid"
 
 
@@ -505,7 +493,6 @@ def test_build_payload_preserves_explicit_thinking_override() -> None:
     key is absent.  An explicit value must survive even when reasoning effort
     would otherwise imply the opposite setting.
     """
-
     payload = VllmBackend._build_payload(
         {
             "model": "qwen",
@@ -529,7 +516,6 @@ def test_build_payload_forwards_invalid_template_kwargs_for_vllm_validation() ->
     fail open consistently instead of tokenizing defaults for an inference
     request that will later be rejected or interpreted differently.
     """
-
     payload = VllmBackend._build_payload(
         {
             "model": "qwen",
@@ -563,7 +549,6 @@ def test_build_payload_preserves_explicit_empty_tools() -> None:
     from a list to ``None`` and can select different server-side rendering
     defaults, so exact tokenization must retain the caller's shape.
     """
-
     payload = VllmBackend._build_payload(
         {"model": "qwen", "messages": [], "tools": []},
     )
@@ -590,7 +575,6 @@ def test_count_accepts_and_caches_an_empty_rendered_prompt() -> None:
     back to a positive rough estimate plus margin; model context length remains
     independently required to be positive.
     """
-
     backend, opener = make_backend([response(0)])
     request = {
         "model": "qwen",
@@ -607,7 +591,6 @@ def test_count_accepts_and_caches_an_empty_rendered_prompt() -> None:
 @pytest.mark.parametrize("value", [True, -1, 1.5, "0"])
 def test_nonnegative_response_integer_rejects_non_counts(value: Any) -> None:
     """Keep malformed tokenizer counts outside the exact-budget contract."""
-
     with pytest.raises(VllmBackend.VllmBackendError, match="invalid count"):
         VllmBackend._nonnegative_response_integer({"count": value}, "count")
 
@@ -719,7 +702,6 @@ def test_backend_rejects_unsafe_environment(
 
 def test_backend_accepts_http_url_with_query() -> None:
     """Accept ordinary HTTP transport components after strict validation."""
-
     backend, _ = make_backend(
         environment={
             "INCONTEXT_TOKENIZER_URL": "http://127.0.0.1:8080/tokenize?mode=1",
@@ -735,7 +717,6 @@ def test_backend_accepts_an_injected_environment() -> None:
     backend keeps an injected skelet storage by reference, its tokenizer URL
     must remain read-only or cached counts could outlive an endpoint change.
     """
-
     with patch.dict(
         "os.environ",
         {"INCONTEXT_TOKENIZER_URL": "https://injected.test/tokenize"},
@@ -766,7 +747,8 @@ def test_backend_sends_exact_request_and_caches_result() -> None:
     assert http_request.get_header("Content-type") == "application/json"
     assert http_request.get_header("User-agent") == "incontext-tests"
     assert timeout == 3.5
-    assert json.loads(http_request.data or b"") == VllmBackend._build_payload(request)
+    assert isinstance(http_request.data, bytes)
+    assert json.loads(http_request.data) == VllmBackend._build_payload(request)
 
 
 def test_backend_preserves_prompt_observable_json_key_order() -> None:
@@ -777,7 +759,6 @@ def test_backend_preserves_prompt_observable_json_key_order() -> None:
     from the one vLLM receives for generation.  Requests with different schema
     order must also occupy different cache entries instead of sharing a count.
     """
-
     backend, opener = make_backend([response(10), response(11)])
     first_properties = {
         "z_first": {"type": "string"},
@@ -813,6 +794,7 @@ def test_backend_preserves_prompt_observable_json_key_order() -> None:
 
     assert len(opener.calls) == 2
     first_wire = opener.calls[0][0].data
+    assert isinstance(first_wire, bytes)
     assert (
         first_wire
         == json.dumps(
@@ -841,7 +823,6 @@ def test_count_honors_positive_prompt_truncation() -> None:
     the raw exact count reproduces the provider-visible input size and avoids
     unnecessary compression caused by budgeting from tokens vLLM discards.
     """
-
     backend, _ = make_backend([response(120)])
     request = {
         "model": "qwen",
@@ -859,7 +840,6 @@ def test_count_honors_extra_body_prompt_truncation_override() -> None:
     Mirroring that precedence keeps counting aligned when a caller replaces a
     top-level truncation limit without mutating the request passed to Hermes.
     """
-
     backend, _ = make_backend([response(120)])
     request = {
         "model": "qwen",
@@ -886,7 +866,6 @@ def test_count_honors_prompt_truncation_values_coerced_by_vllm(
     returns the untruncated rendering, ignoring an accepted wire value counts
     tokens generation drops and can trigger premature compression.
     """
-
     backend, _ = make_backend([response(120)])
 
     assert (
@@ -914,7 +893,6 @@ def test_count_honors_zero_prompt_truncation(
     for those values invents prompt tokens generation discards and can trigger
     unnecessary compression instead of exposing the full output window.
     """
-
     backend, _ = make_backend([response(120)])
 
     assert (
@@ -944,7 +922,6 @@ def test_count_does_not_invent_invalid_prompt_truncation_coercions(
     coercions known to match the provider contract may reduce the tokenizer's
     complete rendered count.
     """
-
     backend, _ = make_backend([response(120)])
 
     assert (
@@ -969,7 +946,6 @@ def test_count_does_not_cap_multimodal_prompt_after_media_expansion() -> None:
     would over-allocate output and violate the compression window.  The
     provider-visible ``extra_body.messages`` override is authoritative here.
     """
-
     backend, _ = make_backend([response(120)])
     request = {
         "model": "qwen",
@@ -999,7 +975,6 @@ def test_count_detects_reusable_multimodal_content_materialized_by_openai() -> N
     sequences misclassifies the image as text-only and clamps the expanded
     prompt, which over-allocates completion tokens.
     """
-
     backend, _ = make_backend([response(120)])
     request = {
         "model": "qwen",
@@ -1029,7 +1004,6 @@ def test_payload_materializes_reusable_tool_collections() -> None:
     schemas even though generation receives them, allowing an unsafe output
     budget whenever those schemas cross the compression boundary.
     """
-
     tools_by_name = {
         "first": {"type": "function", "function": {"name": "first"}},
         "second": {"type": "function", "function": {"name": "second"}},
@@ -1062,7 +1036,6 @@ def test_output_budget_limit_matches_vllm_truncation_validation(
     ceiling while leaving the dynamic ``-1`` sentinel and invalid values to
     provider validation.
     """
-
     backend, _ = make_backend()
 
     assert (
@@ -1087,7 +1060,6 @@ def test_multimodal_truncation_still_limits_vllm_output_budget() -> None:
     must therefore keep the expanded tokenizer result while the independent
     output ceiling remains active.
     """
-
     backend, _ = make_backend()
     request = {
         "model": "qwen",
@@ -1127,7 +1099,6 @@ def test_multimodal_detection_is_conservative_for_wire_message_shapes(
     the raw tokenizer count.  Non-message values remain the provider's
     validation concern and do not themselves imply media expansion.
     """
-
     assert VllmBackend._has_multimodal_content({"messages": messages}) is expected
 
 
@@ -1143,7 +1114,6 @@ def test_count_truncates_vllm_structured_text_content_parts(
     Classifying these parts as media would under-allocate completion space and
     can trigger premature compression.
     """
-
     backend, _ = make_backend([response(120)])
     request = {
         "model": "qwen",
@@ -1168,7 +1138,6 @@ def test_count_truncates_vllm_tool_reference_content_parts() -> None:
     Treating the reference as media keeps the raw tokenizer count, causing
     premature compression and a needlessly smaller output allowance.
     """
-
     backend, _ = make_backend([response(120)])
     request = {
         "model": "qwen",
@@ -1193,7 +1162,6 @@ def test_cached_raw_count_supports_distinct_truncation_limits() -> None:
     retain the raw count and apply each request's limit afterwards; caching an
     already-truncated value would let the first caller poison later budgets.
     """
-
     backend, opener = make_backend([response(120)])
     base = {"model": "qwen", "messages": []}
 
@@ -1224,9 +1192,8 @@ def test_count_uses_disaggregated_decode_prompt_token_ids() -> None:
     length.  Renderer-only controls cannot invalidate an already final token
     sequence, and token-ID changes can reuse the validation cache safely.
     """
-
     backend, opener = make_backend([response(999)])
-    request = {
+    request: dict[str, Any] = {
         "model": "qwen",
         "messages": [{"role": "user", "content": "not the decode prompt"}],
         "tools": [{"type": "function", "function": {"name": "lookup"}}],
@@ -1261,7 +1228,6 @@ def test_count_rejects_invalid_disaggregated_prompt_token_ids(
     unrelated output budget, so the backend must surface a contract error and
     let the middleware use its conservative rough estimator.
     """
-
     backend, opener = make_backend()
 
     with pytest.raises(
@@ -1290,7 +1256,6 @@ def test_falsy_disaggregated_prompt_ids_render_messages_normally(
     sentinels disables exact counting and applies the rough fallback margin to
     a request generation can serve normally.
     """
-
     backend, opener = make_backend([response(120)])
 
     assert (
@@ -1314,7 +1279,6 @@ def test_count_ignores_kv_transfer_metadata_without_reused_prompt_ids() -> None:
     concrete ``prompt_token_ids`` key replaces the chat prompt; unrelated
     metadata must not disable the ordinary exact tokenizer path.
     """
-
     backend, opener = make_backend([response(120)])
 
     assert (
@@ -1343,7 +1307,6 @@ def test_count_uses_raw_count_for_dynamic_minus_one_prompt_truncation(
     its raw P-token prompt.  Skipping ``/tokenize`` would unnecessarily replace
     this exact count with a margin-adjusted rough estimate.
     """
-
     backend, opener = make_backend([response(60, 100)])
 
     assert (
@@ -1408,7 +1371,6 @@ def test_clear_cache_invalidates_an_inflight_tokenizer_response() -> None:
     old response, but that response must not become a cache hit after
     ``clear_cache``; the next caller has to observe the new tokenizer result.
     """
-
     started = threading.Event()
     release = threading.Event()
     calls: list[int] = []
@@ -1492,7 +1454,6 @@ def test_response_contract_is_validated(
     Validation must finish before cache publication so the next identical call
     retries the server and cannot reuse a count from the rejected route.
     """
-
     backend, opener = make_backend([payload, response(7)])
     request = {"model": "qwen", "messages": []}
 

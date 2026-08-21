@@ -191,7 +191,6 @@ def test_rough_fallback_counts_extra_body_prompt_overrides(
     outage; budgeting from superseded top-level content can otherwise allocate
     output beyond the compression boundary by an unbounded amount.
     """
-
     top_messages = [{"role": "user", "content": "superseded"}]
     wire_messages = [{"role": "user", "content": f"wire-{index}"} for index in range(7)]
     wire_tools = [{"type": "function", "function": {"name": "wire"}}]
@@ -239,7 +238,7 @@ def test_runtime_exact_count_preserves_smallest_existing_output_cap(
     runtime = budget.DynamicOutputBudget(
         runtime_settings,
         counter,
-        rough_estimator=lambda request: 999,
+        rough_estimator=lambda _request: 999,
     )
     request = {
         "model": "qwen",
@@ -349,7 +348,6 @@ def test_runtime_budgets_reusable_message_collections(
     reusable sequence skips the dynamic cap for an otherwise valid request;
     incontext must copy it without mutating the caller-owned collection.
     """
-
     messages = ({"role": "user", "content": "tuple prompt"},)
     counter = Counter(10_000)
     runtime = budget.DynamicOutputBudget(runtime_settings, counter)
@@ -373,7 +371,6 @@ def test_runtime_cleans_output_caps_from_read_only_extra_body_mapping(
     wire.  The rewrite must copy and clean the mapping without mutating the
     caller-owned object.
     """
-
     nested_messages = ({"role": "user", "content": "wire prompt"},)
     nested = MappingProxyType(
         {
@@ -416,7 +413,6 @@ def test_runtime_rejects_model_override_in_read_only_extra_body_mapping(
     with the primary backend and context window even though a different model
     is provider-visible.
     """
-
     counter = Counter(100)
     runtime = budget.DynamicOutputBudget(runtime_settings, counter)
 
@@ -443,7 +439,6 @@ def test_runtime_accepts_an_exact_zero_token_truncated_prompt(
     that case; treating zero as an invalid estimate crashes middleware before
     it can preserve the provider's full safe output allowance.
     """
-
     runtime = budget.DynamicOutputBudget(runtime_settings, Counter(0))
 
     result = runtime(request={"model": "qwen", "messages": []})
@@ -576,7 +571,6 @@ def test_runtime_preserves_the_provider_selected_output_field(field: str) -> Non
     use their own alias; replacing the chosen name can turn a valid request into
     HTTP 400 even when the numeric dynamic budget is correct.
     """
-
     runtime_settings = Settings(
         model_name="qwen",
         context_length=65_536,
@@ -697,7 +691,6 @@ def test_runtime_removes_extra_body_output_cap_override() -> None:
     when selecting the smallest caller cap, move the safe result to the same
     top-level field, and remove every nested alias without mutating the input.
     """
-
     runtime_settings = Settings(
         model_name="qwen",
         context_length=1000,
@@ -741,7 +734,6 @@ def test_nested_smaller_cap_preserves_top_level_provider_field() -> None:
     but removing that override must emit the minimum through the existing
     top-level provider field rather than reintroducing the rejected alias.
     """
-
     runtime_settings = Settings(
         model_name="gpt-5-test",
         context_length=1000,
@@ -779,7 +771,6 @@ def test_runtime_rejects_extra_body_model_override(
     bundled backend; otherwise a fallback model receives the primary model's
     token count and compression-window arithmetic.
     """
-
     counter = Counter(100)
     runtime = budget.DynamicOutputBudget(runtime_settings, counter)
     request = {
@@ -903,7 +894,7 @@ def test_runtime_fallback_reserves_safety_margin(
     runtime = budget.DynamicOutputBudget(
         runtime_settings,
         Counter(TimeoutError("secret failure")),
-        rough_estimator=lambda request: 12_000,
+        rough_estimator=lambda _request: 12_000,
     )
     request = {
         "model": "qwen",
@@ -942,7 +933,7 @@ def test_runtime_normalizes_non_positive_fallback_estimate(
     runtime = budget.DynamicOutputBudget(
         runtime_settings,
         Counter(RuntimeError()),
-        rough_estimator=lambda request: 0,
+        rough_estimator=lambda _request: 0,
     )
     result = runtime(request={"model": "qwen", "messages": []})
     assert result is not None
@@ -953,7 +944,7 @@ def test_runtime_leaves_request_unchanged_when_both_estimators_fail(
     runtime_settings: Settings,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    def broken_fallback(request: dict[str, Any]) -> int:
+    def broken_fallback(_request: dict[str, Any]) -> int:
         raise ValueError("fallback secret")
 
     runtime = budget.DynamicOutputBudget(
@@ -990,7 +981,6 @@ def test_runtime_ignores_request_for_a_different_model(
     compression boundary for that model, fail-open is safer than computing an
     apparently exact cap from the primary model's tokenizer.
     """
-
     counter = Counter(100)
     runtime = budget.DynamicOutputBudget(runtime_settings, counter)
 
@@ -1013,7 +1003,6 @@ def test_runtime_ignores_same_model_on_a_different_provider_route() -> None:
     incontext must not apply the primary vLLM tokenizer merely because the JSON
     model string still matches.
     """
-
     counter = Counter(100)
     runtime = budget.DynamicOutputBudget(
         Settings(
@@ -1048,7 +1037,6 @@ def test_runtime_accepts_canonical_equivalent_route() -> None:
     port, and a trailing slash must compare as one route so exact budgeting is
     not accidentally disabled for the configured endpoint.
     """
-
     counter = Counter(100)
     runtime = budget.DynamicOutputBudget(
         Settings(

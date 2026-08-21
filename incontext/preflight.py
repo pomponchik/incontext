@@ -27,7 +27,6 @@ class _ExactPressure(int):
 
 def _live_main_route() -> Optional[Tuple[str, str, str]]:
     """Read Hermes' turn-local primary route across supported releases."""
-
     try:
         auxiliary = import_module("agent.auxiliary_client")
     except ImportError:
@@ -53,7 +52,6 @@ def _live_main_route() -> Optional[Tuple[str, str, str]]:
 
 def _matches_live_route(runtime: DynamicOutputBudget) -> bool:
     """Return whether the exact backend still owns Hermes' active route."""
-
     route = _live_main_route()
     if route is None:
         return True
@@ -80,18 +78,15 @@ class _ExactPreflight:
 
     def acquire(self, owner: object, runtime: RuntimeSource) -> None:
         """Attach one installation owner and make its runtime current."""
-
         self._owners.append((owner, runtime))
 
     def release(self, owner: object) -> None:
         """Release one installation owner without disturbing the others."""
-
         self._owners = [entry for entry in self._owners if entry[0] is not owner]
 
     @property
     def owned(self) -> bool:
         """Return whether this wrapper belongs to an active installation."""
-
         return bool(self._owners)
 
     def __call__(
@@ -206,18 +201,15 @@ class _ExactPreflightGate:
 
     def acquire(self, owner: object, runtime: RuntimeSource) -> None:
         """Attach one installation owner and make its runtime current."""
-
         self._owners.append((owner, runtime))
 
     def release(self, owner: object) -> None:
         """Release one installation owner without disturbing the others."""
-
         self._owners = [entry for entry in self._owners if entry[0] is not owner]
 
     @property
     def owned(self) -> bool:
         """Return whether this wrapper belongs to an active installation."""
-
         return bool(self._owners)
 
     def __call__(self, *args: Any, **kwargs: Any) -> bool:
@@ -243,23 +235,19 @@ class _ExactPreflightDefer:
 
     def acquire(self, owner: object) -> None:
         """Attach one installation owner."""
-
         self._owners.append(owner)
 
     def release(self, owner: object) -> None:
         """Release one installation owner without disturbing the others."""
-
         self._owners = [current for current in self._owners if current is not owner]
 
     @property
     def owned(self) -> bool:
         """Return whether this wrapper belongs to an active installation."""
-
         return bool(self._owners)
 
     def __get__(self, instance: Any, owner: Any = None) -> Any:
         """Bind this callable like the Hermes instance method it replaces."""
-
         del owner
         return self if instance is None else MethodType(self, instance)
 
@@ -282,13 +270,11 @@ InstalledBinding = Tuple[Any, str, PreflightWrapper]
 
 def _original_binding(binding: Any, wrapper_type: Type[Any]) -> Any:
     """Unwrap a released incontext binding before reinstalling it."""
-
     return binding.original if isinstance(binding, wrapper_type) else binding
 
 
 def _estimator_modules(turn_context: Any) -> Tuple[Any, ...]:
     """Return every Hermes module that owns a proactive estimator binding."""
-
     try:
         conversation_loop = import_module("agent.conversation_loop")
     except ImportError:
@@ -307,7 +293,6 @@ def _install_estimators(
     bindings: List[Any],
 ) -> List[InstalledBinding]:
     """Install or share exact wrappers for independent imported bindings."""
-
     installed: List[InstalledBinding] = []
     for module, current in zip(modules, bindings):
         if isinstance(current, _ExactPreflight) and current.owned:
@@ -323,7 +308,6 @@ def _install_estimators(
 
 def _install_exact_deferral(owner: object) -> Optional[InstalledBinding]:
     """Make Hermes' rough-only defer heuristic recognize exact pressure."""
-
     try:
         context_compressor = import_module("agent.context_compressor")
     except ImportError:
@@ -362,7 +346,6 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
     The original estimator remains the deliberate fail-open fallback: a
     temporary tokenizer outage must not prevent Hermes from making requests.
     """
-
     try:
         turn_context = import_module("agent.turn_context")
     except ImportError:
@@ -404,7 +387,6 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
 
     def cleanup() -> None:
         """Release one owner and restore every unchanged Hermes binding."""
-
         nonlocal closed
         with _install_lock:
             if closed:

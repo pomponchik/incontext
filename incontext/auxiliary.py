@@ -45,18 +45,15 @@ class _AuxiliaryBudget:
         output_cap_selector: Optional[OutputCapSelector],
     ) -> None:
         """Add one installation without mutating an earlier owner's state."""
-
         self._owners = (*self._owners, (owner, runtime, output_cap_selector))
 
     def release(self, owner: object) -> None:
         """Remove exactly one installation while retaining all other owners."""
-
         self._owners = tuple(entry for entry in self._owners if entry[0] is not owner)
 
     @property
     def owned(self) -> bool:
         """Return whether at least one live installation owns this wrapper."""
-
         return bool(self._owners)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
@@ -120,7 +117,6 @@ class _AuxiliaryBudget:
         output_cap_selector: Optional[OutputCapSelector],
     ) -> Dict[str, int]:
         """Select Hermes' provider-specific output-cap alias safely."""
-
         if output_cap_selector is not None:
             try:
                 selected = output_cap_selector(value, model=model)
@@ -142,7 +138,6 @@ class _AuxiliaryBudget:
         self,
     ) -> Tuple[RuntimeSource, Optional[OutputCapSelector]]:
         """Read one coherent owner snapshot for the complete request."""
-
         owners = self._owners
         if owners:
             _, runtime, output_cap_selector = owners[-1]
@@ -176,7 +171,6 @@ def _new_wrapper(
     output_cap_selector: Optional[OutputCapSelector],
 ) -> Optional[_AuxiliaryBudget]:
     """Construct an auxiliary wrapper when its callable can be inspected."""
-
     original = (
         current.original
         if isinstance(current, _AuxiliaryBudget)
@@ -194,7 +188,6 @@ def _new_wrapper(
 
 def _load_auxiliary_builder() -> Optional[Tuple[Any, AuxiliaryBuilder]]:
     """Import and validate Hermes' optional private auxiliary binding."""
-
     try:
         auxiliary_client = import_module("agent.auxiliary_client")
     except ImportError:
@@ -214,7 +207,6 @@ def _load_auxiliary_builder() -> Optional[Tuple[Any, AuxiliaryBuilder]]:
 
 def install(runtime: RuntimeSource) -> Optional[Cleanup]:
     """Apply incontext to Hermes requests that bypass ``llm_request`` middleware."""
-
     loaded = _load_auxiliary_builder()
     if loaded is None:
         return None
@@ -244,7 +236,6 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
 
     def cleanup() -> None:
         """Release one owner and restore Hermes after the final unload."""
-
         nonlocal closed
         global _installed_wrapper  # noqa: PLW0603
         with _install_lock:

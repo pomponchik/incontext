@@ -56,7 +56,7 @@ def install_fake_hermes(
     agent.__path__ = []  # type: ignore[attr-defined]
     auxiliary = types.ModuleType("agent.auxiliary_client")
 
-    def build(
+    def build(  # noqa: PLR0913
         provider: str,
         model: str,
         messages: list[Any],
@@ -150,7 +150,6 @@ def test_auxiliary_uses_hermes_provider_output_alias(
     field, so both bounded and unbounded calls must seed dynamic budgeting with
     ``max_completion_tokens`` when Hermes selects it.
     """
-
     auxiliary, _ = install_fake_hermes(monkeypatch)
     selections: list[tuple[int, str]] = []
 
@@ -177,8 +176,8 @@ def test_auxiliary_uses_hermes_provider_output_alias(
 @pytest.mark.parametrize(
     "selector",
     [
-        lambda value, **context: {"max_tokens": False},
-        lambda value, **context: (_ for _ in ()).throw(RuntimeError("boom")),
+        lambda _value, **_context: {"max_tokens": False},
+        lambda _value, **_context: (_ for _ in ()).throw(RuntimeError("boom")),
     ],
 )
 def test_auxiliary_falls_back_from_an_invalid_hermes_output_selector(
@@ -220,7 +219,6 @@ def test_auxiliary_wrapper_accepts_additive_hermes_parameters(
     once Hermes has built the request, that metadata drift must only skip
     budgeting rather than fail the otherwise valid auxiliary call.
     """
-
     auxiliary, builder = install_fake_hermes(monkeypatch)
     if stale_signature:
         builder.__signature__ = Signature(  # type: ignore[attr-defined]
@@ -313,7 +311,6 @@ def test_auxiliary_wrapper_ignores_a_different_fallback_model() -> None:
     Applying that tokenizer and context window to the fallback would corrupt
     its request; the original provider kwargs must pass through untouched.
     """
-
     counter = Counter(12_345)
 
     def build(
@@ -347,7 +344,6 @@ def test_auxiliary_wrapper_ignores_same_model_on_another_route() -> None:
     still wrong when the request is headed to an external provider that happens
     to expose the same alias.
     """
-
     counter = Counter(12_345)
     scoped_runtime = DynamicOutputBudget(
         Settings(
@@ -394,7 +390,6 @@ def test_auxiliary_budgets_synthetic_main_agent_fallback_label() -> None:
     deployment exactly; rejecting only the synthetic label loses both exact
     tokenization and the bounded summary cap that Hermes omitted upstream.
     """
-
     counter = Counter(12_345)
     scoped_runtime = DynamicOutputBudget(
         Settings(
@@ -438,7 +433,6 @@ def test_auxiliary_wrapper_ignores_same_endpoint_on_another_provider() -> None:
     contracts and model routing.  Matching only the URL and model would still
     let the primary backend rewrite a fallback request owned by another route.
     """
-
     counter = Counter(12_345)
     scoped_runtime = DynamicOutputBudget(
         Settings(
@@ -481,7 +475,6 @@ def test_auxiliary_accepts_canonical_equivalent_route() -> None:
     does not change route identity, so those transformations must not silently
     bypass exact budgeting for the configured primary endpoint.
     """
-
     counter = Counter(12_345)
     scoped_runtime = DynamicOutputBudget(
         Settings(
@@ -523,7 +516,6 @@ def test_auxiliary_runtime_resolver_tracks_the_active_profile() -> None:
     in 2026.8.  The resolver must therefore be invoked for every request so a
     profile switch cannot retain the previous profile's backend and window.
     """
-
     active = runtime(Counter(12_345))
     calls: list[None] = []
 
@@ -679,7 +671,6 @@ def test_latest_auxiliary_owner_cleanup_restores_previous_runtime(
     removed runtime would tokenize later requests with a stale model, backend,
     or compression window even though its profile no longer owns the plugin.
     """
-
     auxiliary, _ = install_fake_hermes(monkeypatch)
     first = Counter(10_000)
     second = Counter(20_000)
@@ -716,7 +707,6 @@ def test_cleanup_restores_builder_after_the_last_plugin_owner(
     other, while the final callback must conditionally restore the exact
     original builder and remain safe if invoked twice.
     """
-
     auxiliary, original = install_fake_hermes(monkeypatch)
     first_cleanup = install(runtime(Counter(100)))
     second_cleanup = install(runtime(Counter(200)))
@@ -742,14 +732,15 @@ def test_cleanup_never_overwrites_a_later_auxiliary_wrapper(
     callable must survive incontext unload; cleanup only releases internal
     ownership and must never put an older function back over newer state.
     """
-
     auxiliary, original = install_fake_hermes(monkeypatch)
     first = Counter(100)
     cleanup = install(runtime(first))
     assert callable(cleanup)
     stale_wrapper = auxiliary._build_call_kwargs  # type: ignore[attr-defined]
 
-    replacement = lambda *args, **kwargs: {}  # noqa: E731
+    def replacement(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
     auxiliary._build_call_kwargs = replacement  # type: ignore[attr-defined]
     cleanup()
 
@@ -781,11 +772,12 @@ def test_final_owner_release_cannot_race_auxiliary_configuration() -> None:
     tuples and either raise or mix profile configuration; the in-flight call
     must retain the complete pre-cleanup snapshot.
     """
-
     checked = threading.Event()
     resume = threading.Event()
 
     class BlockingOwners(tuple):
+        __slots__ = ()
+
         def __bool__(self) -> bool:
             checked.set()
             assert resume.wait(timeout=2)
@@ -833,7 +825,6 @@ def test_stale_auxiliary_cleanup_cannot_remove_a_new_installation(
     decrement or restore the new installation's reference count, but it must
     still release its own owner and restore its now-detached module.
     """
-
     stale_auxiliary, stale_original = install_fake_hermes(monkeypatch)
     stale_cleanup = install(runtime(Counter(100)))
     assert callable(stale_cleanup)
@@ -875,7 +866,6 @@ def test_install_skips_a_missing_private_builder(
     layer, so a missing private binding must warn and return ``None`` rather
     than raising ``KeyError`` and rolling back the stable public middleware.
     """
-
     agent = types.ModuleType("agent")
     agent.__path__ = []  # type: ignore[attr-defined]
     auxiliary = types.ModuleType("agent.auxiliary_client")

@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "incontext"
-version = "0.0.4"
+version = "0.0.5"
 authors = [{ name = "Evgeniy Blinov", email = "zheni-b@yandex.ru" }]
 description = "Exact dynamic output budgeting for Hermes Agent"
 readme = "README.md"
@@ -69,13 +69,26 @@ exclude_also = [
 ]
 
 [tool.mypy]
-python_version = "3.8"
 strict = true
 packages = ["incontext"]
 
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+check_untyped_defs = false
+disallow_any_generics = false
+disallow_incomplete_defs = false
+disallow_subclassing_any = false
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+disallow_untyped_defs = false
+extra_checks = false
+no_implicit_reexport = false
+strict_equality = false
+warn_return_any = false
+warn_unused_ignores = false
+
 [tool.ruff]
 line-length = 88
-target-version = "py38"
 
 [tool.ruff.format]
 quote-style = "double"
@@ -84,13 +97,20 @@ quote-style = "double"
 select = [
     "A",
     "ARG",
+    "ASYNC",
     "B",
     "BLE",
     "C4",
     "C90",
+    "COM818",
+    "D201",
+    "D202",
+    "D419",
     "E",
+    "ERA001",
     "F",
     "I",
+    "INP",
     "N",
     "PERF",
     "PIE",
@@ -101,10 +121,13 @@ select = [
     "RSE",
     "RUF",
     "SIM",
+    "SLOT",
     "T20",
+    "TID252",
     "TRY",
     "UP",
     "W",
+    "YTT",
 ]
 ignore = [
     "TRY003",
@@ -115,7 +138,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["ARG", "PLR0913", "PLR2004", "S101"]
+"tests/**/*.py" = ["PLR2004", "S101"]
 
 [tool.mutmut]
 paths_to_mutate = "incontext"
