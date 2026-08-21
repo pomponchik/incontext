@@ -6,6 +6,7 @@ import logging
 import threading
 from collections.abc import Collection, Mapping
 from importlib import import_module
+from types import MethodType
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union, cast
 
 from .budget import DynamicOutputBudget, compression_pressure_tokens
@@ -18,6 +19,10 @@ RuntimeSource = Union[
     Callable[[], Optional[DynamicOutputBudget]],
 ]
 Cleanup = Callable[[], None]
+
+
+class _ExactPressure(int):
+    """Mark a provider-tokenized pressure value as authoritative."""
 
 
 def _live_main_route() -> Optional[Tuple[str, str, str]]:
@@ -156,9 +161,11 @@ class _ExactPreflight:
                 request,
                 context_length=runtime.settings.context_length,
             )
-            return compression_pressure_tokens(
-                prompt_tokens,
-                runtime.settings.min_output_tokens,
+            return _ExactPressure(
+                compression_pressure_tokens(
+                    prompt_tokens,
+                    runtime.settings.min_output_tokens,
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
@@ -227,13 +234,120 @@ class _ExactPreflightGate:
         return runtime_source()
 
 
+class _ExactPreflightDefer:
+    """Preserve Hermes' rough-count deferral while trusting exact pressure."""
+
+    def __init__(self, original: Callable[..., bool]) -> None:
+        self.original = original
+        self._owners: List[object] = []
+
+    def acquire(self, owner: object) -> None:
+        """Attach one installation owner."""
+
+        self._owners.append(owner)
+
+    def release(self, owner: object) -> None:
+        """Release one installation owner without disturbing the others."""
+
+        self._owners = [current for current in self._owners if current is not owner]
+
+    @property
+    def owned(self) -> bool:
+        """Return whether this wrapper belongs to an active installation."""
+
+        return bool(self._owners)
+
+    def __get__(self, instance: Any, owner: Any = None) -> Any:
+        """Bind this callable like the Hermes instance method it replaces."""
+
+        del owner
+        return self if instance is None else MethodType(self, instance)
+
+    def __call__(
+        self,
+        compressor: Any,
+        pressure: int,
+        *args: Any,
+        **kwargs: Any,
+    ) -> bool:
+        if isinstance(pressure, _ExactPressure):
+            return False
+        return bool(self.original(compressor, pressure, *args, **kwargs))
+
+
 _install_lock = threading.Lock()
+PreflightWrapper = Union[_ExactPreflight, _ExactPreflightGate, _ExactPreflightDefer]
+InstalledBinding = Tuple[Any, str, PreflightWrapper]
 
 
 def _original_binding(binding: Any, wrapper_type: Type[Any]) -> Any:
     """Unwrap a released incontext binding before reinstalling it."""
 
     return binding.original if isinstance(binding, wrapper_type) else binding
+
+
+def _estimator_modules(turn_context: Any) -> Tuple[Any, ...]:
+    """Return every Hermes module that owns a proactive estimator binding."""
+
+    try:
+        conversation_loop = import_module("agent.conversation_loop")
+    except ImportError:
+        return (turn_context,)
+    if not callable(
+        conversation_loop.__dict__.get("estimate_request_tokens_rough"),
+    ):
+        return (turn_context,)
+    return turn_context, conversation_loop
+
+
+def _install_estimators(
+    runtime: RuntimeSource,
+    owner: object,
+    modules: Tuple[Any, ...],
+    bindings: List[Any],
+) -> List[InstalledBinding]:
+    """Install or share exact wrappers for independent imported bindings."""
+
+    installed: List[InstalledBinding] = []
+    for module, current in zip(modules, bindings):
+        if isinstance(current, _ExactPreflight) and current.owned:
+            wrapper = current
+        else:
+            original = _original_binding(current, _ExactPreflight)
+            wrapper = _ExactPreflight(runtime, cast(RoughEstimator, original))
+            module.__dict__["estimate_request_tokens_rough"] = wrapper
+        wrapper.acquire(owner, runtime)
+        installed.append((module, "estimate_request_tokens_rough", wrapper))
+    return installed
+
+
+def _install_exact_deferral(owner: object) -> Optional[InstalledBinding]:
+    """Make Hermes' rough-only defer heuristic recognize exact pressure."""
+
+    try:
+        context_compressor = import_module("agent.context_compressor")
+    except ImportError:
+        return None
+    compressor_type = context_compressor.__dict__.get("ContextCompressor")
+    defer_binding = (
+        compressor_type.__dict__.get("should_defer_preflight_to_real_usage")
+        if isinstance(compressor_type, type)
+        else None
+    )
+    if not callable(defer_binding):
+        return None
+    if isinstance(defer_binding, _ExactPreflightDefer) and defer_binding.owned:
+        wrapper = defer_binding
+    else:
+        original = _original_binding(defer_binding, _ExactPreflightDefer)
+        wrapper = _ExactPreflightDefer(cast(Callable[..., bool], original))
+        type.__setattr__(
+            compressor_type,
+            "should_defer_preflight_to_real_usage",
+            wrapper,
+        )
+    wrapper.acquire(owner)
+    return compressor_type, "should_defer_preflight_to_real_usage", wrapper
 
 
 def install(runtime: RuntimeSource) -> Optional[Cleanup]:
@@ -256,9 +370,9 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
         return None
 
     owner = object()
-    wrappers: List[Tuple[Any, str, Union[_ExactPreflight, _ExactPreflightGate]]] = []
+    wrappers: List[InstalledBinding] = []
     with _install_lock:
-        modules = (turn_context,)
+        modules = _estimator_modules(turn_context)
         bindings = [
             module.__dict__.get("estimate_request_tokens_rough") for module in modules
         ]
@@ -268,15 +382,7 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
                 "incontext exact preflight unavailable: Hermes estimator API changed"
             )
             return None
-        for module, current in zip(modules, bindings):
-            if isinstance(current, _ExactPreflight) and current.owned:
-                wrapper = current
-            else:
-                original = _original_binding(current, _ExactPreflight)
-                wrapper = _ExactPreflight(runtime, cast(RoughEstimator, original))
-                module.__dict__["estimate_request_tokens_rough"] = wrapper
-            wrapper.acquire(owner, runtime)
-            wrappers.append((module, "estimate_request_tokens_rough", wrapper))
+        wrappers.extend(_install_estimators(runtime, owner, modules, bindings))
         if isinstance(gate_binding, _ExactPreflightGate) and gate_binding.owned:
             gate_wrapper = gate_binding
         else:
@@ -290,6 +396,9 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
         wrappers.append(
             (turn_context, "_should_run_preflight_estimate", gate_wrapper),
         )
+        defer_wrapper = _install_exact_deferral(owner)
+        if defer_wrapper is not None:
+            wrappers.append(defer_wrapper)
 
     closed = False
 
@@ -301,9 +410,9 @@ def install(runtime: RuntimeSource) -> Optional[Cleanup]:
             if closed:
                 return
             closed = True
-            for module, binding_name, wrapper in wrappers:
+            for target, binding_name, wrapper in wrappers:
                 wrapper.release(owner)
-                if not wrapper.owned and module.__dict__.get(binding_name) is wrapper:
-                    module.__dict__[binding_name] = wrapper.original
+                if not wrapper.owned and target.__dict__.get(binding_name) is wrapper:
+                    setattr(target, binding_name, wrapper.original)
 
     return cleanup
