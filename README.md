@@ -18,10 +18,11 @@
 
 ![incontext logo](https://raw.githubusercontent.com/pomponchik/incontext/develop/docs/assets/logo.svg)
 
-`incontext` is a Hermes Agent plugin that keeps enough room in Hermes'
-compression window for a useful LLM response. It prevents an oversized fixed
-output limit from crowding out input, but never replaces it with a limit so
-small that the agent cannot produce a usable response.
+`incontext` is a [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+plugin that keeps enough room in Hermes' compression window for a useful LLM
+response. It prevents an oversized fixed output limit from crowding out input,
+but never replaces it with a limit so small that the agent cannot produce a
+usable response.
 
 ## Algorithm
 
@@ -31,8 +32,9 @@ The policy uses these values:
 
 - `W` is Hermes' effective compression boundary in tokens: Hermes starts
   compressing context when token pressure reaches it. It is normally resolved
-  by the installed `ContextCompressor`; the emergency override described below
-  can replace it.
+  by the installed
+  [`ContextCompressor`](https://hermes-agent.nousresearch.com/docs/developer-guide/context-compression-and-caching/);
+  the emergency override described below can replace it.
 - `P` is the provider-visible prompt size in tokens, counted exactly when
   possible.
 - `R` is the minimum viable output reserve. It is configured with
@@ -119,8 +121,9 @@ This addresses the same output-budget arithmetic discussed in
 
 ## Installation
 
-Install the published package from PyPI and enable it using the same plugin
-name, `incontext`:
+Install the published package from [PyPI](https://pypi.org/project/incontext/)
+and [enable it](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins/)
+using the same plugin name, `incontext`:
 
 ```bash
 python -m pip install incontext
@@ -141,11 +144,12 @@ has to be copied into `$HERMES_HOME/plugins`.
 
 ## Configuration
 
-The bundled `vllm` backend is selected by default. With Hermes' standard
-context engine, the only required plugin setting is
-`INCONTEXT_TOKENIZER_URL`, which must point to the `/tokenize` endpoint of the
-same vLLM model Hermes uses. This example also shows the most commonly adjusted
-optional settings at their default values:
+The bundled [vLLM](https://docs.vllm.ai/) backend is selected by default. With
+Hermes' standard context engine, the only required plugin setting is
+`INCONTEXT_TOKENIZER_URL`, which must point to the
+[`/tokenize` endpoint](https://docs.vllm.ai/en/stable/api/vllm/entrypoints/serve/tokenize/protocol/)
+of the same vLLM model Hermes uses. This example also shows the most commonly
+adjusted optional settings at their default values:
 
 ```bash
 export INCONTEXT_BACKEND='vllm'
@@ -184,9 +188,10 @@ not on vLLM itself. A backend provides exact token counting, cache invalidation,
 a non-sensitive name for logs (`source`), and optional normalization of
 provider-specific output fields.
 
-Backends are registered by name and discovered through the
-`incontext.backends` entry-point group. `INCONTEXT_BACKEND` selects one and
-defaults to `vllm`.
+Backends are registered by name and discovered through
+[Python entry points](https://packaging.python.org/en/latest/specifications/entry-points/)
+in the `incontext.backends` group. `INCONTEXT_BACKEND` selects one and defaults
+to `vllm`.
 
 The bundled `vllm` backend keeps all vLLM-specific tokenization and transport
 logic outside the budgeting core.
